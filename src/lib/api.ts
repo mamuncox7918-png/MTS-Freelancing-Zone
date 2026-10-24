@@ -1,6 +1,44 @@
 import { auth } from './firebase';
 import { executeClientFirestoreFallback } from './clientFirestoreOps';
 
+function detectKnownStaticHost(): boolean {
+  if (typeof window === 'undefined') return false;
+  const host = window.location.hostname.toLowerCase();
+  return (
+    host.endsWith('.vercel.app') ||
+    host.endsWith('.netlify.app') ||
+    host.endsWith('.web.app') ||
+    host.endsWith('.firebaseapp.com') ||
+    host.endsWith('.pages.dev') ||
+    host.endsWith('.github.io')
+  );
+}
+
+let staticHostDetected = detectKnownStaticHost();
+
+function toReadableError(err: unknown): Error {
+  if (err instanceof Error) {
+    const raw = err.message.trim();
+    if (raw.startsWith('{') && raw.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(raw) as { error?: string; path?: string; operationType?: string };
+        if (parsed.error) {
+          if (parsed.error.includes('Missing or insufficient permissions')) {
+            return new Error(
+              `Permission denied while updating ${parsed.path || 'database'}. Please refresh and verify Admin login.`
+            );
+          }
+          return new Error(parsed.error);
+        }
+      } catch {
+        // Keep original Error below
+      }
+    }
+    return err;
+  }
+  return new Error('Operation failed. Please try again.');
+}
+
 export async function apiRequest<T = Record<string, unknown>>(
   path: string,
   options: {
@@ -15,6 +53,15 @@ export async function apiRequest<T = Record<string, unknown>>(
   }
 
   const method = options.method || 'GET';
+
+  if (staticHostDetected) {
+    try {
+      return await executeClientFirestoreFallback<T>(path, method, options.body);
+    } catch (err) {
+      throw toReadableError(err);
+    }
+  }
+
   const idToken = await currentUser.getIdToken(Boolean(options.forceRefreshToken));
 
   try {
@@ -27,13 +74,23 @@ export async function apiRequest<T = Record<string, unknown>>(
       body: options.body ? JSON.stringify(options.body) : undefined,
     });
 
-    const contentType = res.headers.get('content-type') || '';
-    if (!contentType.includes('application/json')) {
-      // Static host (e.g., Netlify/Vercel/Firebase Hosting) returned SPA HTML or 404 instead of Express JSON API
+    if (
+      res.status === 404 ||
+      res.status === 405 ||
+      res.status === 502 ||
+      res.status === 503 ||
+      res.status === 504
+    ) {
+      if (res.status === 404 || res.status === 405) {
+        staticHostDetected = true;
+      }
       return await executeClientFirestoreFallback<T>(path, method, options.body);
     }
 
-    if (res.status === 404 || res.status === 502 || res.status === 503 || res.status === 504) {
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      // Static host (e.g., Netlify/Vercel/Firebase Hosting) returned SPA HTML instead of Express JSON API
+      staticHostDetected = true;
       return await executeClientFirestoreFallback<T>(path, method, options.body);
     }
 
@@ -45,9 +102,14 @@ export async function apiRequest<T = Record<string, unknown>>(
   } catch (err) {
     if (err instanceof TypeError) {
       // Network fetch error when no backend server is present
-      return await executeClientFirestoreFallback<T>(path, method, options.body);
+      staticHostDetected = true;
+      try {
+        return await executeClientFirestoreFallback<T>(path, method, options.body);
+      } catch (fallbackErr) {
+        throw toReadableError(fallbackErr);
+      }
     }
-    throw err;
+    throw toReadableError(err);
   }
 }
 

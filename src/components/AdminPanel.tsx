@@ -28,7 +28,7 @@ import {
   WithdrawalRequest,
 } from '../types';
 
-type AdminTab =
+export type AdminTab =
   | 'overview'
   | 'members'
   | 'tasks'
@@ -39,8 +39,24 @@ type AdminTab =
   | 'passwords'
   | 'audit';
 
-export function AdminPanel({ currentAdmin }: { currentAdmin: UserProfile }) {
-  const [activeTab, setActiveTab] = useState<AdminTab>('overview');
+export function AdminPanel({
+  currentAdmin,
+  activeTab: controlledTab,
+  onTabChange,
+}: {
+  currentAdmin: UserProfile;
+  activeTab?: AdminTab;
+  onTabChange?: (tab: AdminTab) => void;
+}) {
+  const [internalTab, setInternalTab] = useState<AdminTab>('overview');
+  const activeTab = controlledTab ?? internalTab;
+  const setActiveTab = (tab: AdminTab) => {
+    if (onTabChange) {
+      onTabChange(tab);
+    } else {
+      setInternalTab(tab);
+    }
+  };
 
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [wallets, setWallets] = useState<MemberWallet[]>([]);
@@ -52,7 +68,9 @@ export function AdminPanel({ currentAdmin }: { currentAdmin: UserProfile }) {
   const [auditLogs, setAuditLogs] = useState<AdminAuditLog[]>([]);
 
   const [banner, setBanner] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
+  const [cardError, setCardError] = useState<{ id: string; text: string } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [busyDecision, setBusyDecision] = useState<string | null>(null);
 
   // Member filters & details drawer
   const [memberFilter, setMemberFilter] = useState<'pending' | 'approved' | 'rejected' | 'all'>('pending');
@@ -218,35 +236,50 @@ export function AdminPanel({ currentAdmin }: { currentAdmin: UserProfile }) {
     };
   }, [users, wallets, tasks, submissions, withdrawals, passwordRequests]);
 
+  useEffect(() => {
+    if (!banner || banner.type !== 'success') return;
+    const timer = window.setTimeout(() => {
+      setBanner(null);
+    }, 4500);
+    return () => window.clearTimeout(timer);
+  }, [banner]);
+
   // Handlers
   const handleReviewMember = async (targetUid: string, decision: 'approved' | 'rejected') => {
     setBanner(null);
-    if (decision === 'rejected' && memberRejectReason.trim().length < 3) {
-      setBanner({ type: 'error', text: 'Enter a clear rejection reason (at least 3 characters).' });
-      return;
-    }
+    setCardError(null);
+    const reasonText =
+      decision === 'rejected'
+        ? memberRejectReason.trim().slice(0, MAX_REASON_LENGTH) ||
+          'Application did not meet verification requirements'
+        : '';
+
     setBusyId(targetUid);
+    setBusyDecision(decision);
     try {
       await apiRequest(`/api/admin/members/${targetUid}/review`, {
         method: 'POST',
         body: {
           decision,
-          rejectionReason: decision === 'rejected' ? memberRejectReason.trim() : '',
+          rejectionReason: reasonText,
         },
       });
       setRejectingMemberUid(null);
       setMemberRejectReason('');
       setBanner({
         type: 'success',
-        text: `Member registration ${decision === 'approved' ? 'approved' : 'rejected'}.`,
+        text: `Member registration ${decision === 'approved' ? 'approved' : 'rejected'} successfully.`,
       });
     } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Member review action failed.';
+      setCardError({ id: targetUid, text: msg });
       setBanner({
         type: 'error',
-        text: err instanceof Error ? err.message : 'Member review action failed.',
+        text: msg,
       });
     } finally {
       setBusyId(null);
+      setBusyDecision(null);
     }
   };
 
@@ -347,20 +380,27 @@ export function AdminPanel({ currentAdmin }: { currentAdmin: UserProfile }) {
 
   const handleReviewSubmission = async (
     submissionId: string,
-    decision: 'approved' | 'rejected'
+    decision: 'approved' | 'rejected',
+    overrideReason?: string
   ) => {
     setBanner(null);
-    if (decision === 'rejected' && subRejectReason.trim().length < 3) {
-      setBanner({ type: 'error', text: 'Provide a clear rejection reason for the member.' });
-      return;
-    }
+    setCardError(null);
+    const trimmedReason = (overrideReason !== undefined ? overrideReason : subRejectReason)
+      .trim()
+      .slice(0, MAX_REASON_LENGTH);
+    const finalReason =
+      decision === 'rejected'
+        ? trimmedReason || 'Submitted proof did not match task instructions'
+        : '';
+
     setBusyId(submissionId);
+    setBusyDecision(decision);
     try {
       await apiRequest(`/api/admin/submissions/${submissionId}/review`, {
         method: 'POST',
         body: {
           decision,
-          rejectionReason: decision === 'rejected' ? subRejectReason.trim().slice(0, MAX_REASON_LENGTH) : '',
+          rejectionReason: finalReason,
         },
       });
       setRejectingSubId(null);
@@ -369,16 +409,19 @@ export function AdminPanel({ currentAdmin }: { currentAdmin: UserProfile }) {
         type: 'success',
         text:
           decision === 'approved'
-            ? 'Proof approved and task reward credited once to member wallet.'
-            : 'Proof rejected with explanation.',
+            ? 'Proof approved and task reward credited to member wallet.'
+            : 'Proof rejected.',
       });
     } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Submission review failed.';
+      setCardError({ id: submissionId, text: msg });
       setBanner({
         type: 'error',
-        text: err instanceof Error ? err.message : 'Submission review failed.',
+        text: msg,
       });
     } finally {
       setBusyId(null);
+      setBusyDecision(null);
     }
   };
 
@@ -554,13 +597,22 @@ export function AdminPanel({ currentAdmin }: { currentAdmin: UserProfile }) {
 
       {banner && (
         <div
-          className={`p-4 rounded-2xl border text-xs sm:text-sm ${
+          role="status"
+          className={`fixed top-14 left-4 right-4 z-50 max-w-lg mx-auto p-3.5 rounded-2xl border shadow-2xl backdrop-blur-md flex items-start justify-between gap-3 text-xs sm:text-sm ${
             banner.type === 'success'
-              ? 'bg-emerald-500/12 border-emerald-400/30 text-emerald-200'
-              : 'bg-rose-500/12 border-rose-400/30 text-rose-200'
+              ? 'bg-[#072922]/95 border-emerald-400/40 text-emerald-100'
+              : 'bg-[#2A0B14]/95 border-rose-400/40 text-rose-100'
           }`}
         >
-          {banner.text}
+          <span className="leading-relaxed font-medium">{banner.text}</span>
+          <button
+            type="button"
+            onClick={() => setBanner(null)}
+            className="min-h-[28px] min-w-[28px] flex items-center justify-center rounded-lg text-white/70 hover:text-white shrink-0"
+            aria-label="Dismiss notification"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
       )}
 
@@ -759,9 +811,11 @@ export function AdminPanel({ currentAdmin }: { currentAdmin: UserProfile }) {
                             type="button"
                             disabled={busyId === m.uid}
                             onClick={() => handleReviewMember(m.uid, 'approved')}
-                            className="min-h-[40px] px-3.5 rounded-xl bg-teal-500 hover:bg-teal-400 text-slate-950 text-xs font-semibold"
+                            className="min-h-[40px] px-3.5 rounded-xl bg-teal-500 hover:bg-teal-400 disabled:opacity-50 text-slate-950 text-xs font-semibold cursor-pointer"
                           >
-                            Approve
+                            {busyId === m.uid && busyDecision === 'approved'
+                              ? 'Approving...'
+                              : 'Approve'}
                           </button>
                         )}
 
@@ -770,10 +824,11 @@ export function AdminPanel({ currentAdmin }: { currentAdmin: UserProfile }) {
                             type="button"
                             disabled={busyId === m.uid}
                             onClick={() => {
-                              setRejectingMemberUid(rejectingMemberUid === m.uid ? null : m.uid);
+                              setRejectingMemberUid(m.uid);
                               setMemberRejectReason(m.rejectionReason || '');
+                              setCardError(null);
                             }}
-                            className="min-h-[40px] px-3.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 text-xs font-semibold"
+                            className="min-h-[40px] px-3.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 disabled:opacity-50 text-rose-300 text-xs font-semibold cursor-pointer"
                           >
                             Reject
                           </button>
@@ -781,24 +836,45 @@ export function AdminPanel({ currentAdmin }: { currentAdmin: UserProfile }) {
                       </div>
                     </div>
 
+                    {cardError?.id === m.uid && (
+                      <div className="p-3 rounded-xl bg-rose-500/12 border border-rose-400/30 text-xs text-rose-200">
+                        {cardError.text}
+                      </div>
+                    )}
+
                     {rejectingMemberUid === m.uid && (
-                      <div className="pt-3 border-t border-white/10 flex flex-col sm:flex-row gap-2">
+                      <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-400/25 space-y-2.5">
                         <input
                           type="text"
                           maxLength={MAX_REASON_LENGTH}
                           value={memberRejectReason}
                           onChange={(e) => setMemberRejectReason(e.target.value)}
-                          placeholder="Enter rejection reason shown to applicant..."
-                          className="flex-1 min-h-[42px] px-3 rounded-xl bg-[#070E20] border border-white/15 text-xs sm:text-sm text-white"
+                          placeholder="Optional rejection reason (or tap Confirm Reject directly)..."
+                          className="w-full min-h-[42px] px-3 rounded-xl bg-[#070E20] border border-white/15 text-xs sm:text-sm text-white"
                         />
-                        <button
-                          type="button"
-                          disabled={busyId === m.uid}
-                          onClick={() => handleReviewMember(m.uid, 'rejected')}
-                          className="min-h-[42px] px-4 rounded-xl bg-rose-500 hover:bg-rose-400 text-slate-950 text-xs font-semibold whitespace-nowrap"
-                        >
-                          Confirm Reject
-                        </button>
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            disabled={busyId === m.uid}
+                            onClick={() => {
+                              setRejectingMemberUid(null);
+                              setMemberRejectReason('');
+                            }}
+                            className="min-h-[40px] px-3.5 rounded-xl bg-white/8 hover:bg-white/12 text-xs font-medium text-white"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busyId === m.uid}
+                            onClick={() => handleReviewMember(m.uid, 'rejected')}
+                            className="min-h-[40px] px-4 rounded-xl bg-rose-500 hover:bg-rose-400 disabled:opacity-50 text-slate-950 text-xs font-semibold whitespace-nowrap cursor-pointer"
+                          >
+                            {busyId === m.uid && busyDecision === 'rejected'
+                              ? 'Rejecting...'
+                              : 'Confirm Reject'}
+                          </button>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -995,48 +1071,74 @@ export function AdminPanel({ currentAdmin }: { currentAdmin: UserProfile }) {
 
                     {sub.status === 'pending' && (
                       <div className="pt-3 border-t border-white/10 space-y-3">
+                        {cardError?.id === sub.submissionId && (
+                          <div className="p-3 rounded-xl bg-rose-500/12 border border-rose-400/30 text-xs text-rose-200">
+                            {cardError.text}
+                          </div>
+                        )}
+
                         <div className="grid grid-cols-2 gap-2.5">
                           <button
                             type="button"
                             disabled={busyId === sub.submissionId}
                             onClick={() => handleReviewSubmission(sub.submissionId, 'approved')}
-                            className="min-h-[44px] px-3 rounded-xl bg-teal-500 hover:bg-teal-400 text-slate-950 text-xs font-semibold"
+                            className="min-h-[46px] px-3 rounded-xl bg-teal-500 hover:bg-teal-400 active:scale-[0.99] disabled:opacity-50 text-slate-950 text-xs font-semibold transition-all cursor-pointer"
                           >
-                            Approve & Credit {formatBdt(sub.rewardAmount)}
+                            {busyId === sub.submissionId && busyDecision === 'approved'
+                              ? 'Approving...'
+                              : `Approve & Credit ${formatBdt(sub.rewardAmount)}`}
                           </button>
                           <button
                             type="button"
                             disabled={busyId === sub.submissionId}
                             onClick={() => {
-                              setRejectingSubId(
-                                rejectingSubId === sub.submissionId ? null : sub.submissionId
-                              );
+                              setRejectingSubId(sub.submissionId);
                               setSubRejectReason('');
+                              setCardError(null);
                             }}
-                            className="min-h-[44px] px-3 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 text-xs font-semibold"
+                            className={`min-h-[46px] px-3 rounded-xl text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer ${
+                              rejectingSubId === sub.submissionId
+                                ? 'bg-rose-500/30 border border-rose-400/40 text-rose-200'
+                                : 'bg-rose-500/15 hover:bg-rose-500/25 text-rose-300'
+                            }`}
                           >
                             Reject Proof
                           </button>
                         </div>
 
                         {rejectingSubId === sub.submissionId && (
-                          <div className="flex gap-2">
+                          <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-400/25 space-y-2.5">
                             <input
                               type="text"
                               maxLength={MAX_REASON_LENGTH}
                               value={subRejectReason}
                               onChange={(e) => setSubRejectReason(e.target.value)}
-                              placeholder="Reason for rejecting screenshot..."
-                              className="flex-1 min-h-[42px] px-3 rounded-xl bg-[#070E20] border border-white/15 text-xs text-white"
+                              placeholder="Optional reason (or tap Confirm Reject directly)..."
+                              className="w-full min-h-[42px] px-3 rounded-xl bg-[#070E20] border border-white/15 text-xs text-white"
                             />
-                            <button
-                              type="button"
-                              disabled={busyId === sub.submissionId}
-                              onClick={() => handleReviewSubmission(sub.submissionId, 'rejected')}
-                              className="min-h-[42px] px-3.5 rounded-xl bg-rose-500 text-slate-950 text-xs font-semibold whitespace-nowrap"
-                            >
-                              Confirm
-                            </button>
+                            <div className="grid grid-cols-2 gap-2">
+                              <button
+                                type="button"
+                                disabled={busyId === sub.submissionId}
+                                onClick={() => {
+                                  setRejectingSubId(null);
+                                  setSubRejectReason('');
+                                }}
+                                className="min-h-[42px] px-3 rounded-xl bg-white/8 hover:bg-white/12 text-xs font-medium text-white"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busyId === sub.submissionId}
+                                onClick={() => handleReviewSubmission(sub.submissionId, 'rejected')}
+                                className="min-h-[42px] px-3.5 rounded-xl bg-rose-500 hover:bg-rose-400 disabled:opacity-50 text-slate-950 text-xs font-semibold whitespace-nowrap cursor-pointer"
+                              >
+                                {busyId === sub.submissionId && busyDecision === 'rejected'
+                                  ? 'Rejecting...'
+                                  : 'Confirm Reject'}
+                              </button>
+                            </div>
                           </div>
                         )}
                       </div>
@@ -1771,7 +1873,7 @@ export function AdminPanel({ currentAdmin }: { currentAdmin: UserProfile }) {
                       </h3>
                       <div className="divide-y divide-white/8 rounded-xl bg-[#070E20] border border-white/10 px-3.5">
                         {memberSubs.slice(0, 5).map((s) => (
-                          <div key={s.submissionId} className="py-2.5 text-xs space-y-1">
+                          <div key={s.submissionId} className="py-3 text-xs space-y-2">
                             <div className="flex items-center justify-between gap-2">
                               <span className="text-white font-medium truncate">
                                 {s.taskCode} · {s.taskTitle}
@@ -1790,6 +1892,36 @@ export function AdminPanel({ currentAdmin }: { currentAdmin: UserProfile }) {
                                 <span className="truncate max-w-xs">{s.proofLink}</span>
                                 <ExternalLink className="w-3 h-3 shrink-0" />
                               </a>
+                            )}
+                            {s.status === 'pending' && (
+                              <div className="flex items-center gap-2 pt-1">
+                                <button
+                                  type="button"
+                                  disabled={busyId === s.submissionId}
+                                  onClick={() => handleReviewSubmission(s.submissionId, 'approved')}
+                                  className="min-h-[36px] px-3 rounded-lg bg-teal-500 hover:bg-teal-400 disabled:opacity-50 text-slate-950 text-xs font-semibold"
+                                >
+                                  {busyId === s.submissionId && busyDecision === 'approved'
+                                    ? 'Approving...'
+                                    : `Approve ${formatBdt(s.rewardAmount)}`}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={busyId === s.submissionId}
+                                  onClick={() =>
+                                    handleReviewSubmission(
+                                      s.submissionId,
+                                      'rejected',
+                                      'Submitted proof did not match task instructions'
+                                    )
+                                  }
+                                  className="min-h-[36px] px-3 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 disabled:opacity-50 text-rose-200 text-xs font-semibold"
+                                >
+                                  {busyId === s.submissionId && busyDecision === 'rejected'
+                                    ? 'Rejecting...'
+                                    : 'Reject'}
+                                </button>
+                              </div>
                             )}
                           </div>
                         ))}

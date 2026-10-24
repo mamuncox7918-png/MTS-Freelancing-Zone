@@ -31,12 +31,15 @@ service cloud.firestore {
     }
 
     function isBootstrappedAdmin() {
-      return isVerified() && request.auth.token.email == 'mamuncox7918@gmail.com';
+      return isVerified() &&
+        request.auth.token.email is string &&
+        request.auth.token.email.size() <= 150 &&
+        request.auth.token.email.lower() == 'mamuncox7918@gmail.com';
     }
 
     function isAdmin() {
       return isVerified() && (
-        request.auth.token.email == 'mamuncox7918@gmail.com' ||
+        isBootstrappedAdmin() ||
         exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );
     }
@@ -60,10 +63,9 @@ service cloud.firestore {
 
     function isValidUserProfile(data) {
       return data.keys().hasAll([
-          'uid', 'memberId', 'fullName', 'email', 'phone', 'authProvider',
-          'photoAssetId', 'role', 'status', 'rejectionReason',
-          'completedTasksCount', 'pendingSubmissionsCount', 'totalEarnings',
-          'lastPasswordChangedAt', 'createdAt', 'updatedAt'
+          'uid', 'memberId', 'fullName', 'email', 'authProvider',
+          'role', 'status', 'completedTasksCount', 'pendingSubmissionsCount',
+          'totalEarnings', 'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
           'uid', 'memberId', 'fullName', 'email', 'phone', 'authProvider',
@@ -72,20 +74,23 @@ service cloud.firestore {
           'lastPasswordChangedAt', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.uid) &&
-        data.memberId is string && data.memberId.size() >= 8 && data.memberId.size() <= 20 && data.memberId.matches('^MTS-[0-9]{6}$') &&
-        data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 100 &&
+        data.memberId is string && data.memberId.size() >= 6 && data.memberId.size() <= 20 &&
+        data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 300 &&
         data.email is string && data.email.size() >= 3 && data.email.size() <= 150 &&
-        data.phone is string && data.phone.size() <= 25 &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 25)) &&
         data.authProvider is string && data.authProvider.size() <= 20 && data.authProvider in ['password', 'google.com'] &&
-        data.photoAssetId is string && data.photoAssetId.size() <= 128 &&
-        (data.photoAssetId == '' || isValidId(data.photoAssetId)) &&
+        (!('photoAssetId' in data) || (
+          data.photoAssetId is string &&
+          data.photoAssetId.size() <= 128 &&
+          (data.photoAssetId == '' || isValidId(data.photoAssetId))
+        )) &&
         data.role is string && data.role.size() <= 10 && data.role in ['member', 'admin'] &&
         data.status is string && data.status.size() <= 15 && data.status in ['pending', 'approved', 'rejected'] &&
-        data.rejectionReason is string && data.rejectionReason.size() <= 300 &&
+        (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 1000)) &&
         data.completedTasksCount is number && data.completedTasksCount >= 0 &&
         data.pendingSubmissionsCount is number && data.pendingSubmissionsCount >= 0 &&
         data.totalEarnings is number && data.totalEarnings >= 0 &&
-        data.lastPasswordChangedAt is string && data.lastPasswordChangedAt.size() <= 40 &&
+        (!('lastPasswordChangedAt' in data) || (data.lastPasswordChangedAt is string && data.lastPasswordChangedAt.size() <= 40)) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -113,8 +118,8 @@ service cloud.firestore {
         ]) &&
         isValidId(data.taskId) &&
         data.taskCode is string && data.taskCode.size() >= 6 && data.taskCode.size() <= 20 && data.taskCode.matches('^TSK-[0-9]{5}$') &&
-        data.title is string && data.title.size() >= 3 && data.title.size() <= 140 &&
-        data.instructions is string && data.instructions.size() >= 5 && data.instructions.size() <= 2000 &&
+        data.title is string && data.title.size() >= 3 && data.title.size() <= 400 &&
+        data.instructions is string && data.instructions.size() >= 5 && data.instructions.size() <= 5000 &&
         data.externalLink is string && data.externalLink.size() >= 8 && data.externalLink.size() <= 500 &&
         data.rewardAmount is number && data.rewardAmount >= 1 && data.rewardAmount <= 100000 &&
         data.isActive is bool &&
@@ -126,7 +131,7 @@ service cloud.firestore {
     function isValidTaskSubmission(data) {
       return data.keys().hasAll([
           'submissionId', 'taskId', 'taskCode', 'taskTitle', 'rewardAmount',
-          'userId', 'memberId', 'memberName', 'screenshotAssetId', 'submissionNote',
+          'userId', 'memberId', 'memberName', 'screenshotAssetId',
           'status', 'rejectionReason', 'reviewedBy', 'reviewedAt', 'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
@@ -137,20 +142,20 @@ service cloud.firestore {
         isValidId(data.submissionId) &&
         isValidId(data.taskId) &&
         data.taskCode is string && data.taskCode.size() >= 6 && data.taskCode.size() <= 20 &&
-        data.taskTitle is string && data.taskTitle.size() >= 3 && data.taskTitle.size() <= 140 &&
+        data.taskTitle is string && data.taskTitle.size() >= 2 && data.taskTitle.size() <= 400 &&
         data.rewardAmount is number && data.rewardAmount >= 1 && data.rewardAmount <= 100000 &&
         isValidId(data.userId) &&
-        data.memberId is string && data.memberId.size() >= 8 && data.memberId.size() <= 20 &&
-        data.memberName is string && data.memberName.size() >= 2 && data.memberName.size() <= 100 &&
+        data.memberId is string && data.memberId.size() >= 6 && data.memberId.size() <= 20 &&
+        data.memberName is string && data.memberName.size() >= 1 && data.memberName.size() <= 300 &&
         isValidId(data.screenshotAssetId) &&
         (!('proofLink' in data) || (
           data.proofLink is string &&
           data.proofLink.size() <= 500 &&
-          (data.proofLink == '' || data.proofLink.matches('^https?://.+'))
+          (data.proofLink == '' || data.proofLink.matches('^[hH][tT][tT][pP][sS]?://.+'))
         )) &&
-        data.submissionNote is string && data.submissionNote.size() <= 500 &&
+        (!('submissionNote' in data) || (data.submissionNote is string && data.submissionNote.size() <= 1500)) &&
         data.status is string && data.status.size() <= 15 && data.status in ['pending', 'approved', 'rejected'] &&
-        data.rejectionReason is string && data.rejectionReason.size() <= 300 &&
+        data.rejectionReason is string && data.rejectionReason.size() <= 1000 &&
         data.reviewedBy is string && data.reviewedBy.size() <= 128 &&
         data.reviewedAt is string && data.reviewedAt.size() <= 40 &&
         data.createdAt is timestamp &&
@@ -160,8 +165,7 @@ service cloud.firestore {
     function isValidMemberWallet(data) {
       return data.keys().hasAll([
           'userId', 'memberId', 'availableBalance', 'totalEarnings',
-          'totalWithdrawals', 'totalWithdrawalFees', 'reservedWithdrawals',
-          'lastWithdrawalId', 'createdAt', 'updatedAt'
+          'totalWithdrawals', 'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
           'userId', 'memberId', 'availableBalance', 'totalEarnings',
@@ -169,14 +173,17 @@ service cloud.firestore {
           'lastWithdrawalId', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.userId) &&
-        data.memberId is string && data.memberId.size() >= 8 && data.memberId.size() <= 20 &&
+        data.memberId is string && data.memberId.size() >= 6 && data.memberId.size() <= 20 &&
         data.availableBalance is number && data.availableBalance >= 0 &&
         data.totalEarnings is number && data.totalEarnings >= 0 &&
         data.totalWithdrawals is number && data.totalWithdrawals >= 0 &&
-        data.totalWithdrawalFees is number && data.totalWithdrawalFees >= 0 &&
-        data.reservedWithdrawals is number && data.reservedWithdrawals >= 0 &&
-        data.lastWithdrawalId is string && data.lastWithdrawalId.size() <= 128 &&
-        (data.lastWithdrawalId == '' || isValidId(data.lastWithdrawalId)) &&
+        (!('totalWithdrawalFees' in data) || (data.totalWithdrawalFees is number && data.totalWithdrawalFees >= 0)) &&
+        (!('reservedWithdrawals' in data) || (data.reservedWithdrawals is number && data.reservedWithdrawals >= 0)) &&
+        (!('lastWithdrawalId' in data) || (
+          data.lastWithdrawalId is string &&
+          data.lastWithdrawalId.size() <= 128 &&
+          (data.lastWithdrawalId == '' || isValidId(data.lastWithdrawalId))
+        )) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -192,13 +199,13 @@ service cloud.firestore {
         ]) &&
         isValidId(data.transactionId) &&
         isValidId(data.userId) &&
-        data.memberId is string && data.memberId.size() >= 8 && data.memberId.size() <= 20 &&
+        data.memberId is string && data.memberId.size() >= 6 && data.memberId.size() <= 20 &&
         data.type is string && data.type.size() <= 30 && data.type in ['task_reward', 'withdrawal_request', 'withdrawal_paid', 'withdrawal_refund'] &&
         data.amount is number && data.amount > 0 &&
         data.feeAmount is number && data.feeAmount >= 0 &&
         data.netAmount is number && data.netAmount > 0 &&
         data.direction is string && data.direction.size() <= 15 && data.direction in ['credit', 'debit', 'settlement'] &&
-        data.description is string && data.description.size() >= 3 && data.description.size() <= 250 &&
+        data.description is string && data.description.size() >= 3 && data.description.size() <= 1000 &&
         isValidId(data.referenceId) &&
         data.createdAt is timestamp;
     }
@@ -219,15 +226,15 @@ service cloud.firestore {
         isValidId(data.withdrawalId) &&
         data.transactionCode is string && data.transactionCode.size() >= 8 && data.transactionCode.size() <= 25 && data.transactionCode.matches('^WDR-[0-9A-Z\\-]+$') &&
         isValidId(data.userId) &&
-        data.memberId is string && data.memberId.size() >= 8 && data.memberId.size() <= 20 &&
-        data.memberName is string && data.memberName.size() >= 2 && data.memberName.size() <= 100 &&
+        data.memberId is string && data.memberId.size() >= 6 && data.memberId.size() <= 20 &&
+        data.memberName is string && data.memberName.size() >= 1 && data.memberName.size() <= 300 &&
         data.payoutMethod is string && data.payoutMethod.size() <= 15 && data.payoutMethod in ['bKash', 'Nagad'] &&
         data.accountNumber is string && data.accountNumber.size() >= 11 && data.accountNumber.size() <= 15 && data.accountNumber.matches('^(\\+88)?01[3-9][0-9]{8}$') &&
         data.grossAmount is number && data.grossAmount >= 100 && data.grossAmount <= 500000 &&
         data.feeAmount is number && data.feeAmount == 5 &&
         data.netAmount is number && data.netAmount >= 95 && data.netAmount == data.grossAmount - 5 &&
         data.status is string && data.status.size() <= 15 && data.status in ['pending', 'paid', 'rejected'] &&
-        data.adminNote is string && data.adminNote.size() <= 300 &&
+        data.adminNote is string && data.adminNote.size() <= 1000 &&
         data.paymentReference is string && data.paymentReference.size() <= 100 &&
         data.processedBy is string && data.processedBy.size() <= 128 &&
         data.processedAt is string && data.processedAt.size() <= 40 &&
@@ -248,13 +255,13 @@ service cloud.firestore {
         ]) &&
         isValidId(data.requestId) &&
         isValidId(data.userId) &&
-        data.memberId is string && data.memberId.size() >= 8 && data.memberId.size() <= 20 &&
-        data.memberName is string && data.memberName.size() >= 2 && data.memberName.size() <= 100 &&
+        data.memberId is string && data.memberId.size() >= 6 && data.memberId.size() <= 20 &&
+        data.memberName is string && data.memberName.size() >= 1 && data.memberName.size() <= 300 &&
         data.memberEmail is string && data.memberEmail.size() >= 3 && data.memberEmail.size() <= 150 &&
         data.authProvider is string && data.authProvider.size() <= 20 && data.authProvider in ['password', 'google.com'] &&
-        data.reason is string && data.reason.size() >= 5 && data.reason.size() <= 400 &&
+        data.reason is string && data.reason.size() >= 5 && data.reason.size() <= 1200 &&
         data.status is string && data.status.size() <= 15 && data.status in ['pending', 'approved', 'rejected', 'completed'] &&
-        data.decisionNote is string && data.decisionNote.size() <= 300 &&
+        data.decisionNote is string && data.decisionNote.size() <= 1000 &&
         data.reviewedBy is string && data.reviewedBy.size() <= 128 &&
         data.reviewedAt is string && data.reviewedAt.size() <= 40 &&
         data.createdAt is timestamp &&
@@ -274,7 +281,7 @@ service cloud.firestore {
         data.action is string && data.action.size() >= 3 && data.action.size() <= 80 &&
         data.targetType is string && data.targetType.size() >= 2 && data.targetType.size() <= 40 &&
         data.targetId is string && data.targetId.size() >= 1 && data.targetId.size() <= 128 &&
-        data.summary is string && data.summary.size() >= 3 && data.summary.size() <= 500 &&
+        data.summary is string && data.summary.size() >= 3 && data.summary.size() <= 1500 &&
         data.createdAt is timestamp;
     }
 
@@ -304,7 +311,6 @@ service cloud.firestore {
             request.auth.uid == userId &&
             incoming().role == 'member' &&
             incoming().status == 'pending' &&
-            incoming().rejectionReason == '' &&
             incoming().completedTasksCount == 0 &&
             incoming().pendingSubmissionsCount == 0 &&
             incoming().totalEarnings == 0
@@ -329,7 +335,8 @@ service cloud.firestore {
             incoming().role == existing().role &&
             incoming().diff(existing()).affectedKeys().hasOnly([
               'status', 'rejectionReason', 'completedTasksCount',
-              'pendingSubmissionsCount', 'totalEarnings', 'updatedAt'
+              'pendingSubmissionsCount', 'totalEarnings', 'photoAssetId',
+              'lastPasswordChangedAt', 'updatedAt'
             ])
           ) ||
           // Action 2: Bootstrapped owner elevates own initial profile to admin
@@ -446,15 +453,19 @@ service cloud.firestore {
       allow list: if isBootstrappedAdmin() || (isVerified() && resource.data.userId == request.auth.uid);
       allow create: if isVerified() && isValidId(userId) && isValidMemberWallet(incoming()) &&
         incoming().userId == userId &&
-        incoming().availableBalance == 0 &&
-        incoming().totalEarnings == 0 &&
-        incoming().totalWithdrawals == 0 &&
-        incoming().totalWithdrawalFees == 0 &&
-        incoming().reservedWithdrawals == 0 &&
-        incoming().lastWithdrawalId == '' &&
         incoming().createdAt == request.time &&
-        incoming().updatedAt == request.time &&
-        (request.auth.uid == userId || isAdmin());
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (
+            request.auth.uid == userId &&
+            incoming().availableBalance == 0 &&
+            incoming().totalEarnings == 0 &&
+            incoming().totalWithdrawals == 0 &&
+            (!('totalWithdrawalFees' in incoming()) || incoming().totalWithdrawalFees == 0) &&
+            (!('reservedWithdrawals' in incoming()) || incoming().reservedWithdrawals == 0) &&
+            (!('lastWithdrawalId' in incoming()) || incoming().lastWithdrawalId == '')
+          )
+        );
       allow update: if isVerified() && isValidMemberWallet(incoming()) && isValidId(userId) &&
         incoming().userId == existing().userId &&
         incoming().memberId == existing().memberId &&
@@ -465,20 +476,22 @@ service cloud.firestore {
             isAdmin() &&
             incoming().diff(existing()).affectedKeys().hasOnly([
               'availableBalance', 'totalEarnings', 'totalWithdrawals',
-              'totalWithdrawalFees', 'reservedWithdrawals', 'updatedAt'
+              'totalWithdrawalFees', 'reservedWithdrawals', 'lastWithdrawalId', 'updatedAt'
             ])
           ) ||
           // Action 2: Atomic member withdrawal reservation verified via getAfter
           (
             request.auth.uid == userId &&
             isApprovedMember() &&
+            ('lastWithdrawalId' in incoming()) &&
             isValidId(incoming().lastWithdrawalId) &&
+            ('reservedWithdrawals' in incoming()) &&
             incoming().diff(existing()).affectedKeys().hasOnly([
               'availableBalance', 'reservedWithdrawals', 'lastWithdrawalId', 'updatedAt'
             ]) &&
             incoming().availableBalance < existing().availableBalance &&
             (existing().availableBalance - incoming().availableBalance) >= 100 &&
-            incoming().reservedWithdrawals == existing().reservedWithdrawals + (existing().availableBalance - incoming().availableBalance) &&
+            incoming().reservedWithdrawals == (('reservedWithdrawals' in existing()) ? existing().reservedWithdrawals : 0) + (existing().availableBalance - incoming().availableBalance) &&
             !exists(/databases/$(database)/documents/withdrawals/$(incoming().lastWithdrawalId)) &&
             getAfter(/databases/$(database)/documents/withdrawals/$(incoming().lastWithdrawalId)).data.userId == request.auth.uid &&
             getAfter(/databases/$(database)/documents/withdrawals/$(incoming().lastWithdrawalId)).data.grossAmount == (existing().availableBalance - incoming().availableBalance)

@@ -53,6 +53,12 @@ export default defineConfig(() => {
         workbox: {
           navigateFallbackDenylist: [/^\/api\//],
           globPatterns: ['**/*.{js,css,html,ico,png,jpg,svg,woff,woff2}'],
+          globIgnores: [
+            'assets/aistudio/Screenshot_*',
+            'assets/aistudio/IMG-20261025-WA0004*',
+            'assets/aistudio/IMG-20261025-WA0005*',
+            'assets/aistudio/IMG-20261025-WA0006*',
+          ],
           runtimeCaching: [
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,

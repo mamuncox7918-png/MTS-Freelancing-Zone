@@ -740,9 +740,10 @@ async function startServer() {
         if (decision !== 'approved' && decision !== 'rejected') {
           throw new HttpError(400, 'Decision must be approved or rejected.');
         }
-        if (decision === 'rejected' && rejectionReason.length < 3) {
-          throw new HttpError(400, 'Please provide a clear reason when rejecting a registration.');
-        }
+        const finalMemberRejectReason =
+          decision === 'rejected'
+            ? rejectionReason || 'Application did not meet verification requirements'
+            : '';
 
         await runAtomicTransaction(admin.idToken, async (tx) => {
           const targetUser = await tx.get('users', targetUid);
@@ -763,7 +764,7 @@ async function startServer() {
               {
                 ...targetUser.data,
                 status: decision,
-                rejectionReason: decision === 'rejected' ? rejectionReason : '',
+                rejectionReason: finalMemberRejectReason,
                 createdAt: preserveTimestamp(targetUser.raw, 'createdAt'),
               },
               targetUser.updateTime
@@ -974,17 +975,18 @@ async function startServer() {
 
         const submissionId = String(req.params.submissionId || '');
         const decision = req.body?.decision;
-        const rejectionReason =
+        const rawReason =
           typeof req.body?.rejectionReason === 'string' ? req.body.rejectionReason.trim().slice(0, 300) : '';
+        const rejectionReason =
+          decision === 'rejected'
+            ? rawReason || 'Submitted proof did not match task instructions'
+            : '';
 
         if (!VALID_ID_REGEX.test(submissionId)) {
           throw new HttpError(400, 'Invalid submission ID.');
         }
         if (decision !== 'approved' && decision !== 'rejected') {
           throw new HttpError(400, 'Decision must be approved or rejected.');
-        }
-        if (decision === 'rejected' && rejectionReason.length < 3) {
-          throw new HttpError(400, 'Please enter a rejection reason so the member knows what to fix.');
         }
 
         const nowIso = new Date().toISOString();
@@ -1002,13 +1004,11 @@ async function startServer() {
           }
 
           const memberUid = String(submission.data.userId);
+          const memberCode = String(submission.data.memberId || 'MTS-000000');
           const rewardAmount = Number(submission.data.rewardAmount);
 
           const memberProfile = await tx.get('users', memberUid);
           const memberWallet = await tx.get('wallets', memberUid);
-          if (!memberProfile || !memberWallet) {
-            throw new HttpError(404, 'Submitting member profile or wallet missing.');
-          }
 
           const logId = generateDocId('log');
           const writes = [
@@ -1018,7 +1018,7 @@ async function startServer() {
               {
                 ...submission.data,
                 status: decision,
-                rejectionReason: decision === 'rejected' ? rejectionReason : '',
+                rejectionReason,
                 reviewedBy: admin.uid,
                 reviewedAt: nowIso,
                 createdAt: preserveTimestamp(submission.raw, 'createdAt'),
@@ -1027,52 +1027,79 @@ async function startServer() {
             ),
           ];
 
-          const prevPending = Number(memberProfile.data.pendingSubmissionsCount || 0);
-          const prevCompleted = Number(memberProfile.data.completedTasksCount || 0);
-          const prevUserEarnings = Number(memberProfile.data.totalEarnings || 0);
-
           if (decision === 'approved') {
             const txLedgerId = generateDocId('tx');
-            const prevAvail = Number(memberWallet.data.availableBalance || 0);
-            const prevWalletEarnings = Number(memberWallet.data.totalEarnings || 0);
+
+            if (memberWallet) {
+              const prevAvail = Number(memberWallet.data.availableBalance || 0);
+              const prevWalletEarnings = Number(memberWallet.data.totalEarnings || 0);
+              writes.push(
+                buildReplaceUpdateWrite(
+                  'wallets',
+                  memberUid,
+                  {
+                    ...memberWallet.data,
+                    availableBalance: prevAvail + rewardAmount,
+                    totalEarnings: prevWalletEarnings + rewardAmount,
+                    createdAt: preserveTimestamp(memberWallet.raw, 'createdAt'),
+                  },
+                  memberWallet.updateTime
+                )
+              );
+            } else {
+              writes.push(
+                buildCreateWrite(
+                  'wallets',
+                  memberUid,
+                  {
+                    userId: memberUid,
+                    memberId: memberCode,
+                    availableBalance: rewardAmount,
+                    totalEarnings: rewardAmount,
+                    totalWithdrawals: 0,
+                    totalWithdrawalFees: 0,
+                    reservedWithdrawals: 0,
+                    lastWithdrawalId: '',
+                  },
+                  ['createdAt', 'updatedAt']
+                )
+              );
+            }
+
+            if (memberProfile) {
+              const prevPending = Number(memberProfile.data.pendingSubmissionsCount || 0);
+              const prevCompleted = Number(memberProfile.data.completedTasksCount || 0);
+              const prevUserEarnings = Number(memberProfile.data.totalEarnings || 0);
+              writes.push(
+                buildReplaceUpdateWrite(
+                  'users',
+                  memberUid,
+                  {
+                    ...memberProfile.data,
+                    pendingSubmissionsCount: Math.max(0, prevPending - 1),
+                    completedTasksCount: prevCompleted + 1,
+                    totalEarnings: prevUserEarnings + rewardAmount,
+                    createdAt: preserveTimestamp(memberProfile.raw, 'createdAt'),
+                  },
+                  memberProfile.updateTime
+                )
+              );
+            }
 
             writes.push(
-              buildReplaceUpdateWrite(
-                'wallets',
-                memberUid,
-                {
-                  ...memberWallet.data,
-                  availableBalance: prevAvail + rewardAmount,
-                  totalEarnings: prevWalletEarnings + rewardAmount,
-                  createdAt: preserveTimestamp(memberWallet.raw, 'createdAt'),
-                },
-                memberWallet.updateTime
-              ),
-              buildReplaceUpdateWrite(
-                'users',
-                memberUid,
-                {
-                  ...memberProfile.data,
-                  pendingSubmissionsCount: Math.max(0, prevPending - 1),
-                  completedTasksCount: prevCompleted + 1,
-                  totalEarnings: prevUserEarnings + rewardAmount,
-                  createdAt: preserveTimestamp(memberProfile.raw, 'createdAt'),
-                },
-                memberProfile.updateTime
-              ),
               buildCreateWrite(
                 'transactions',
                 txLedgerId,
                 {
                   transactionId: txLedgerId,
                   userId: memberUid,
-                  memberId: String(submission.data.memberId),
+                  memberId: memberCode,
                   type: 'task_reward',
                   amount: rewardAmount,
                   feeAmount: 0,
                   netAmount: rewardAmount,
                   direction: 'credit',
-                  description: `Task reward credited for ${submission.data.taskCode} (${submission.data.taskTitle})`,
+                  description: `Task reward credited for ${submission.data.taskCode} (${String(submission.data.taskTitle || '').slice(0, 140)})`.slice(0, 240),
                   referenceId: submissionId,
                 },
                 ['createdAt']
@@ -1087,23 +1114,28 @@ async function startServer() {
                   action: 'SUBMISSION_APPROVED',
                   targetType: 'submission',
                   targetId: submissionId,
-                  summary: `Approved proof for ${submission.data.taskCode} by ${submission.data.memberId} and credited ৳${rewardAmount}`,
+                  summary: `Approved proof for ${submission.data.taskCode} by ${memberCode} and credited ৳${rewardAmount}`.slice(0, 450),
                 },
                 ['createdAt']
               )
             );
           } else {
+            if (memberProfile) {
+              const prevPending = Number(memberProfile.data.pendingSubmissionsCount || 0);
+              writes.push(
+                buildReplaceUpdateWrite(
+                  'users',
+                  memberUid,
+                  {
+                    ...memberProfile.data,
+                    pendingSubmissionsCount: Math.max(0, prevPending - 1),
+                    createdAt: preserveTimestamp(memberProfile.raw, 'createdAt'),
+                  },
+                  memberProfile.updateTime
+                )
+              );
+            }
             writes.push(
-              buildReplaceUpdateWrite(
-                'users',
-                memberUid,
-                {
-                  ...memberProfile.data,
-                  pendingSubmissionsCount: Math.max(0, prevPending - 1),
-                  createdAt: preserveTimestamp(memberProfile.raw, 'createdAt'),
-                },
-                memberProfile.updateTime
-              ),
               buildCreateWrite(
                 'adminAuditLogs',
                 logId,
@@ -1114,7 +1146,7 @@ async function startServer() {
                   action: 'SUBMISSION_REJECTED',
                   targetType: 'submission',
                   targetId: submissionId,
-                  summary: `Rejected proof for ${submission.data.taskCode} by ${submission.data.memberId}: ${rejectionReason}`,
+                  summary: `Rejected proof for ${submission.data.taskCode} by ${memberCode}: ${rejectionReason}`.slice(0, 450),
                 },
                 ['createdAt']
               )
@@ -1400,15 +1432,21 @@ async function startServer() {
 
   // Mount Vite dev middleware in development or static dist in production
   const distPath = path.resolve(process.cwd(), 'dist');
+  const isDevScript =
+    process.env.NODE_ENV === 'development' || process.env.npm_lifecycle_event === 'dev';
   const isProduction =
     process.env.NODE_ENV === 'production' ||
     process.env.npm_lifecycle_event === 'start' ||
-    (process.env.NODE_ENV !== 'development' && fs.existsSync(path.join(distPath, 'index.html')));
+    (!isDevScript && fs.existsSync(path.join(distPath, 'index.html')));
 
   if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: false,
+        watch: process.env.DISABLE_HMR === 'true' ? null : undefined,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

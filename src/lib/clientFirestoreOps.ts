@@ -494,7 +494,11 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
   if (method === 'POST' && memberReviewMatch) {
     const targetUid = memberReviewMatch[1];
     const decision = body.decision;
-    const rejectionReason = typeof body.rejectionReason === 'string' ? body.rejectionReason.trim().slice(0, 300) : '';
+    const rawReason = typeof body.rejectionReason === 'string' ? body.rejectionReason.trim().slice(0, 300) : '';
+    const rejectionReason =
+      decision === 'rejected'
+        ? rawReason || 'Application did not meet verification requirements'
+        : '';
     if (decision !== 'approved' && decision !== 'rejected') {
       throw new Error('Decision must be approved or rejected.');
     }
@@ -511,7 +515,7 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
 
       batch.update(doc(db, 'users', targetUid), {
         status: decision,
-        rejectionReason: decision === 'rejected' ? rejectionReason : '',
+        rejectionReason,
         updatedAt: serverTimestamp(),
       });
       if (!walletSnap.exists()) {
@@ -535,7 +539,7 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
         action: decision === 'approved' ? 'MEMBER_APPROVED' : 'MEMBER_REJECTED',
         targetType: 'user',
         targetId: targetUid,
-        summary: `${decision === 'approved' ? 'Approved' : 'Rejected'} member ${targetData.memberId} (${targetData.fullName})`,
+        summary: `${decision === 'approved' ? 'Approved' : 'Rejected'} member ${targetData.memberId} (${String(targetData.fullName || '').slice(0, 120)})`.slice(0, 450),
         createdAt: serverTimestamp(),
       });
       await batch.commit();
@@ -633,7 +637,11 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
   if (method === 'POST' && subReviewMatch) {
     const submissionId = subReviewMatch[1];
     const decision = body.decision;
-    const rejectionReason = typeof body.rejectionReason === 'string' ? body.rejectionReason.trim().slice(0, 300) : '';
+    const rawReason = typeof body.rejectionReason === 'string' ? body.rejectionReason.trim().slice(0, 300) : '';
+    const rejectionReason =
+      decision === 'rejected'
+        ? rawReason || 'Submitted proof did not match task instructions'
+        : '';
     if (decision !== 'approved' && decision !== 'rejected') {
       throw new Error('Decision must be approved or rejected.');
     }
@@ -647,24 +655,20 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
       }
 
       const memberUid = String(subData.userId);
+      const memberCode = String(subData.memberId || 'MTS-000000');
       const rewardAmount = Number(subData.rewardAmount);
       const [memberSnap, walletSnap] = await Promise.all([
         getDoc(doc(db, 'users', memberUid)),
         getDoc(doc(db, 'wallets', memberUid)),
       ]);
-      if (!memberSnap.exists() || !walletSnap.exists()) {
-        throw new Error('Submitting member profile or wallet missing.');
-      }
 
-      const memberData = memberSnap.data();
-      const walletData = walletSnap.data();
       const nowIso = new Date().toISOString();
       const logId = randomDocId('log');
       const batch = writeBatch(db);
 
       batch.update(doc(db, 'submissions', submissionId), {
         status: decision,
-        rejectionReason: decision === 'rejected' ? rejectionReason : '',
+        rejectionReason,
         reviewedBy: uid,
         reviewedAt: nowIso,
         updatedAt: serverTimestamp(),
@@ -672,27 +676,48 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
 
       if (decision === 'approved') {
         const txId = randomDocId('tx');
-        batch.update(doc(db, 'wallets', memberUid), {
-          availableBalance: Number(walletData.availableBalance || 0) + rewardAmount,
-          totalEarnings: Number(walletData.totalEarnings || 0) + rewardAmount,
-          updatedAt: serverTimestamp(),
-        });
-        batch.update(doc(db, 'users', memberUid), {
-          pendingSubmissionsCount: Math.max(0, Number(memberData.pendingSubmissionsCount || 0) - 1),
-          completedTasksCount: Number(memberData.completedTasksCount || 0) + 1,
-          totalEarnings: Number(memberData.totalEarnings || 0) + rewardAmount,
-          updatedAt: serverTimestamp(),
-        });
+        if (walletSnap.exists()) {
+          const walletData = walletSnap.data();
+          batch.update(doc(db, 'wallets', memberUid), {
+            availableBalance: Number(walletData.availableBalance || 0) + rewardAmount,
+            totalEarnings: Number(walletData.totalEarnings || 0) + rewardAmount,
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          batch.set(doc(db, 'wallets', memberUid), {
+            userId: memberUid,
+            memberId: memberCode,
+            availableBalance: rewardAmount,
+            totalEarnings: rewardAmount,
+            totalWithdrawals: 0,
+            totalWithdrawalFees: 0,
+            reservedWithdrawals: 0,
+            lastWithdrawalId: '',
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+
+        if (memberSnap.exists()) {
+          const memberData = memberSnap.data();
+          batch.update(doc(db, 'users', memberUid), {
+            pendingSubmissionsCount: Math.max(0, Number(memberData.pendingSubmissionsCount || 0) - 1),
+            completedTasksCount: Number(memberData.completedTasksCount || 0) + 1,
+            totalEarnings: Number(memberData.totalEarnings || 0) + rewardAmount,
+            updatedAt: serverTimestamp(),
+          });
+        }
+
         batch.set(doc(db, 'transactions', txId), {
           transactionId: txId,
           userId: memberUid,
-          memberId: String(subData.memberId),
+          memberId: memberCode,
           type: 'task_reward',
           amount: rewardAmount,
           feeAmount: 0,
           netAmount: rewardAmount,
           direction: 'credit',
-          description: `Task reward credited for ${subData.taskCode} (${subData.taskTitle})`,
+          description: `Task reward credited for ${subData.taskCode} (${String(subData.taskTitle || '').slice(0, 140)})`.slice(0, 240),
           referenceId: submissionId,
           createdAt: serverTimestamp(),
         });
@@ -703,14 +728,17 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
           action: 'SUBMISSION_APPROVED',
           targetType: 'submission',
           targetId: submissionId,
-          summary: `Approved proof for ${subData.taskCode} by ${subData.memberId} and credited ৳${rewardAmount}`,
+          summary: `Approved proof for ${subData.taskCode} by ${memberCode} and credited ৳${rewardAmount}`.slice(0, 450),
           createdAt: serverTimestamp(),
         });
       } else {
-        batch.update(doc(db, 'users', memberUid), {
-          pendingSubmissionsCount: Math.max(0, Number(memberData.pendingSubmissionsCount || 0) - 1),
-          updatedAt: serverTimestamp(),
-        });
+        if (memberSnap.exists()) {
+          const memberData = memberSnap.data();
+          batch.update(doc(db, 'users', memberUid), {
+            pendingSubmissionsCount: Math.max(0, Number(memberData.pendingSubmissionsCount || 0) - 1),
+            updatedAt: serverTimestamp(),
+          });
+        }
         batch.set(doc(db, 'adminAuditLogs', logId), {
           logId,
           adminUid: uid,
@@ -718,7 +746,7 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
           action: 'SUBMISSION_REJECTED',
           targetType: 'submission',
           targetId: submissionId,
-          summary: `Rejected proof for ${subData.taskCode} by ${subData.memberId}: ${rejectionReason}`,
+          summary: `Rejected proof for ${subData.taskCode} by ${memberCode}: ${rejectionReason}`.slice(0, 450),
           createdAt: serverTimestamp(),
         });
       }

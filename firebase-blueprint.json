@@ -50,7 +50,7 @@
           "type": "string",
           "description": "Full display name of the member.",
           "minLength": 2,
-          "maxLength": 100
+          "maxLength": 300
         },
         "email": {
           "type": "string",
@@ -90,7 +90,7 @@
         "rejectionReason": {
           "type": "string",
           "description": "Reason provided by Admin if registration was rejected.",
-          "maxLength": 300
+          "maxLength": 1000
         },
         "completedTasksCount": {
           "type": "number",
@@ -125,16 +125,12 @@
         "memberId",
         "fullName",
         "email",
-        "phone",
         "authProvider",
-        "photoAssetId",
         "role",
         "status",
-        "rejectionReason",
         "completedTasksCount",
         "pendingSubmissionsCount",
         "totalEarnings",
-        "lastPasswordChangedAt",
         "createdAt",
         "updatedAt"
       ]
@@ -211,13 +207,13 @@
           "type": "string",
           "description": "Short descriptive task title.",
           "minLength": 3,
-          "maxLength": 140
+          "maxLength": 400
         },
         "instructions": {
           "type": "string",
           "description": "Step-by-step instructions for completing the task and capturing proof.",
           "minLength": 5,
-          "maxLength": 2000
+          "maxLength": 5000
         },
         "externalLink": {
           "type": "string",
@@ -292,8 +288,8 @@
         "taskTitle": {
           "type": "string",
           "description": "Snapshot of task title.",
-          "minLength": 3,
-          "maxLength": 140
+          "minLength": 2,
+          "maxLength": 400
         },
         "rewardAmount": {
           "type": "number",
@@ -309,14 +305,14 @@
         "memberId": {
           "type": "string",
           "description": "Submitting member human-readable ID.",
-          "minLength": 8,
+          "minLength": 6,
           "maxLength": 20
         },
         "memberName": {
           "type": "string",
           "description": "Submitting member display name.",
-          "minLength": 2,
-          "maxLength": 100
+          "minLength": 1,
+          "maxLength": 300
         },
         "screenshotAssetId": {
           "type": "string",
@@ -333,7 +329,7 @@
         "submissionNote": {
           "type": "string",
           "description": "Optional note or username proof provided by member.",
-          "maxLength": 500
+          "maxLength": 1500
         },
         "status": {
           "type": "string",
@@ -344,7 +340,7 @@
         "rejectionReason": {
           "type": "string",
           "description": "Explanation provided by Admin when rejecting a submission.",
-          "maxLength": 300
+          "maxLength": 1000
         },
         "reviewedBy": {
           "type": "string",
@@ -377,7 +373,6 @@
         "memberId",
         "memberName",
         "screenshotAssetId",
-        "submissionNote",
         "status",
         "rejectionReason",
         "reviewedBy",
@@ -446,9 +441,6 @@
         "availableBalance",
         "totalEarnings",
         "totalWithdrawals",
-        "totalWithdrawalFees",
-        "reservedWithdrawals",
-        "lastWithdrawalId",
         "createdAt",
         "updatedAt"
       ]
@@ -506,7 +498,7 @@
           "type": "string",
           "description": "Human-readable ledger summary.",
           "minLength": 3,
-          "maxLength": 250
+          "maxLength": 1000
         },
         "referenceId": {
           "type": "string",
@@ -570,8 +562,8 @@
         "memberName": {
           "type": "string",
           "description": "Requesting member full name.",
-          "minLength": 2,
-          "maxLength": 100
+          "minLength": 1,
+          "maxLength": 300
         },
         "payoutMethod": {
           "type": "string",
@@ -607,7 +599,7 @@
         "adminNote": {
           "type": "string",
           "description": "Admin review or rejection note.",
-          "maxLength": 300
+          "maxLength": 1000
         },
         "paymentReference": {
           "type": "string",
@@ -683,8 +675,8 @@
         "memberName": {
           "type": "string",
           "description": "Requesting member full name.",
-          "minLength": 2,
-          "maxLength": 100
+          "minLength": 1,
+          "maxLength": 300
         },
         "memberEmail": {
           "type": "string",
@@ -703,7 +695,7 @@
           "type": "string",
           "description": "Reason for requesting password change authorization (never contains passwords).",
           "minLength": 5,
-          "maxLength": 400
+          "maxLength": 1200
         },
         "status": {
           "type": "string",
@@ -714,7 +706,7 @@
         "decisionNote": {
           "type": "string",
           "description": "Admin approval or rejection note.",
-          "maxLength": 300
+          "maxLength": 1000
         },
         "reviewedBy": {
           "type": "string",
@@ -801,7 +793,7 @@
           "type": "string",
           "description": "Human-readable audit description.",
           "minLength": 3,
-          "maxLength": 500
+          "maxLength": 1500
         },
         "createdAt": {
           "type": "string",
