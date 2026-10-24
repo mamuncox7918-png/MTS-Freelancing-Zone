@@ -1,0 +1,857 @@
+{
+  "entities": {
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Trusted administrator membership record used for RBAC verification.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the administrator.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified administrator email address.",
+          "minLength": 3,
+          "maxLength": 150
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when admin access was provisioned."
+        }
+      },
+      "required": ["uid", "email", "createdAt"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Member or Admin account profile including approval status and summary counters.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID matching the document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "memberId": {
+          "type": "string",
+          "description": "Unique human-readable member identifier.",
+          "minLength": 8,
+          "maxLength": 20,
+          "pattern": "^MTS-[0-9]{6}$"
+        },
+        "fullName": {
+          "type": "string",
+          "description": "Full display name of the member.",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Primary verified email address.",
+          "minLength": 3,
+          "maxLength": 150
+        },
+        "phone": {
+          "type": "string",
+          "description": "Optional or registered mobile number.",
+          "maxLength": 25
+        },
+        "authProvider": {
+          "type": "string",
+          "description": "Authentication provider identifier.",
+          "enum": ["password", "google.com"],
+          "maxLength": 20
+        },
+        "photoAssetId": {
+          "type": "string",
+          "description": "Reference ID in mediaAssets for profile photo, or empty string.",
+          "maxLength": 128
+        },
+        "role": {
+          "type": "string",
+          "description": "System role.",
+          "enum": ["member", "admin"],
+          "maxLength": 10
+        },
+        "status": {
+          "type": "string",
+          "description": "Account registration approval state.",
+          "enum": ["pending", "approved", "rejected"],
+          "maxLength": 15
+        },
+        "rejectionReason": {
+          "type": "string",
+          "description": "Reason provided by Admin if registration was rejected.",
+          "maxLength": 300
+        },
+        "completedTasksCount": {
+          "type": "number",
+          "description": "Count of Admin-approved task submissions."
+        },
+        "pendingSubmissionsCount": {
+          "type": "number",
+          "description": "Count of proof submissions currently awaiting review."
+        },
+        "totalEarnings": {
+          "type": "number",
+          "description": "Cumulative approved task rewards in BDT."
+        },
+        "lastPasswordChangedAt": {
+          "type": "string",
+          "description": "ISO timestamp of most recent approved password update, or empty string.",
+          "maxLength": 40
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Registration timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last profile modification timestamp."
+        }
+      },
+      "required": [
+        "uid",
+        "memberId",
+        "fullName",
+        "email",
+        "phone",
+        "authProvider",
+        "photoAssetId",
+        "role",
+        "status",
+        "rejectionReason",
+        "completedTasksCount",
+        "pendingSubmissionsCount",
+        "totalEarnings",
+        "lastPasswordChangedAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "MediaAsset": {
+      "title": "MediaAsset",
+      "description": "Isolated binary-encoded compressed image asset for avatars and task proof screenshots.",
+      "type": "object",
+      "properties": {
+        "assetId": {
+          "type": "string",
+          "description": "Unique media asset ID.",
+          "minLength": 4,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID of the member who uploaded the image.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "purpose": {
+          "type": "string",
+          "description": "Intended usage of the image asset.",
+          "enum": ["avatar", "proof"],
+          "maxLength": 10
+        },
+        "mimeType": {
+          "type": "string",
+          "description": "Validated image MIME type.",
+          "enum": ["image/webp", "image/jpeg", "image/png"],
+          "maxLength": 20
+        },
+        "dataUrl": {
+          "type": "string",
+          "description": "Compressed base64 data URL strictly bounded below 250KB.",
+          "minLength": 20,
+          "maxLength": 250000
+        },
+        "sizeBytes": {
+          "type": "number",
+          "description": "Decoded byte length of the image."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Upload server timestamp."
+        }
+      },
+      "required": ["assetId", "ownerId", "purpose", "mimeType", "dataUrl", "sizeBytes", "createdAt"]
+    },
+    "TaskItem": {
+      "title": "TaskItem",
+      "description": "Freelancing micro-task created and managed by Admin.",
+      "type": "object",
+      "properties": {
+        "taskId": {
+          "type": "string",
+          "description": "Unique task document ID.",
+          "minLength": 4,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "taskCode": {
+          "type": "string",
+          "description": "Human-readable task code.",
+          "minLength": 6,
+          "maxLength": 20,
+          "pattern": "^TSK-[0-9]{5}$"
+        },
+        "title": {
+          "type": "string",
+          "description": "Short descriptive task title.",
+          "minLength": 3,
+          "maxLength": 140
+        },
+        "instructions": {
+          "type": "string",
+          "description": "Step-by-step instructions for completing the task and capturing proof.",
+          "minLength": 5,
+          "maxLength": 2000
+        },
+        "externalLink": {
+          "type": "string",
+          "description": "External destination URL where the member performs the task.",
+          "minLength": 8,
+          "maxLength": 500
+        },
+        "rewardAmount": {
+          "type": "number",
+          "description": "Reward credited upon Admin approval in Bangladeshi Taka (BDT)."
+        },
+        "isActive": {
+          "type": "boolean",
+          "description": "Whether the task is visible and open for new member submissions."
+        },
+        "createdBy": {
+          "type": "string",
+          "description": "Admin UID who created the task.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp."
+        }
+      },
+      "required": [
+        "taskId",
+        "taskCode",
+        "title",
+        "instructions",
+        "externalLink",
+        "rewardAmount",
+        "isActive",
+        "createdBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "TaskSubmission": {
+      "title": "TaskSubmission",
+      "description": "Proof screenshot submission by an approved member for an active task.",
+      "type": "object",
+      "properties": {
+        "submissionId": {
+          "type": "string",
+          "description": "Unique submission ID.",
+          "minLength": 4,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "taskId": {
+          "type": "string",
+          "description": "Target task ID.",
+          "minLength": 4,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "taskCode": {
+          "type": "string",
+          "description": "Snapshot of human-readable task code.",
+          "minLength": 6,
+          "maxLength": 20
+        },
+        "taskTitle": {
+          "type": "string",
+          "description": "Snapshot of task title.",
+          "minLength": 3,
+          "maxLength": 140
+        },
+        "rewardAmount": {
+          "type": "number",
+          "description": "Verified task reward amount in BDT."
+        },
+        "userId": {
+          "type": "string",
+          "description": "Submitting member UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "memberId": {
+          "type": "string",
+          "description": "Submitting member human-readable ID.",
+          "minLength": 8,
+          "maxLength": 20
+        },
+        "memberName": {
+          "type": "string",
+          "description": "Submitting member display name.",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "screenshotAssetId": {
+          "type": "string",
+          "description": "MediaAsset ID of the uploaded proof screenshot.",
+          "minLength": 4,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "proofLink": {
+          "type": "string",
+          "description": "Optional external proof link shared by member alongside screenshot.",
+          "maxLength": 500
+        },
+        "submissionNote": {
+          "type": "string",
+          "description": "Optional note or username proof provided by member.",
+          "maxLength": 500
+        },
+        "status": {
+          "type": "string",
+          "description": "Review lifecycle state.",
+          "enum": ["pending", "approved", "rejected"],
+          "maxLength": 15
+        },
+        "rejectionReason": {
+          "type": "string",
+          "description": "Explanation provided by Admin when rejecting a submission.",
+          "maxLength": 300
+        },
+        "reviewedBy": {
+          "type": "string",
+          "description": "Admin UID who reviewed the submission.",
+          "maxLength": 128
+        },
+        "reviewedAt": {
+          "type": "string",
+          "description": "ISO timestamp when Admin completed review.",
+          "maxLength": 40
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Submission timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last status update timestamp."
+        }
+      },
+      "required": [
+        "submissionId",
+        "taskId",
+        "taskCode",
+        "taskTitle",
+        "rewardAmount",
+        "userId",
+        "memberId",
+        "memberName",
+        "screenshotAssetId",
+        "submissionNote",
+        "status",
+        "rejectionReason",
+        "reviewedBy",
+        "reviewedAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "MemberWallet": {
+      "title": "MemberWallet",
+      "description": "Atomic wallet ledger balances for an individual member.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner member UID matching document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "memberId": {
+          "type": "string",
+          "description": "Owner human-readable member ID.",
+          "minLength": 8,
+          "maxLength": 20
+        },
+        "availableBalance": {
+          "type": "number",
+          "description": "Current withdrawable balance in BDT."
+        },
+        "totalEarnings": {
+          "type": "number",
+          "description": "Cumulative approved task rewards in BDT."
+        },
+        "totalWithdrawals": {
+          "type": "number",
+          "description": "Cumulative paid gross withdrawals in BDT."
+        },
+        "totalWithdrawalFees": {
+          "type": "number",
+          "description": "Cumulative paid withdrawal fees in BDT."
+        },
+        "reservedWithdrawals": {
+          "type": "number",
+          "description": "Gross withdrawal funds currently reserved in pending requests."
+        },
+        "lastWithdrawalId": {
+          "type": "string",
+          "description": "Most recent withdrawal ID used for atomic deduction verification.",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Wallet creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last balance mutation timestamp."
+        }
+      },
+      "required": [
+        "userId",
+        "memberId",
+        "availableBalance",
+        "totalEarnings",
+        "totalWithdrawals",
+        "totalWithdrawalFees",
+        "reservedWithdrawals",
+        "lastWithdrawalId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "WalletTransaction": {
+      "title": "WalletTransaction",
+      "description": "Immutable financial ledger record for rewards, withdrawals, fees, payments, and refunds.",
+      "type": "object",
+      "properties": {
+        "transactionId": {
+          "type": "string",
+          "description": "Unique transaction ID.",
+          "minLength": 4,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Wallet owner UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "memberId": {
+          "type": "string",
+          "description": "Human-readable member ID.",
+          "minLength": 8,
+          "maxLength": 20
+        },
+        "type": {
+          "type": "string",
+          "description": "Ledger transaction classification.",
+          "enum": ["task_reward", "withdrawal_request", "withdrawal_paid", "withdrawal_refund"],
+          "maxLength": 30
+        },
+        "amount": {
+          "type": "number",
+          "description": "Gross BDT amount associated with the transaction."
+        },
+        "feeAmount": {
+          "type": "number",
+          "description": "Fixed withdrawal fee in BDT (5 for withdrawals, 0 otherwise)."
+        },
+        "netAmount": {
+          "type": "number",
+          "description": "Net BDT amount credited, paid, or refunded."
+        },
+        "direction": {
+          "type": "string",
+          "description": "Balance movement direction.",
+          "enum": ["credit", "debit", "settlement"],
+          "maxLength": 15
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable ledger summary.",
+          "minLength": 3,
+          "maxLength": 250
+        },
+        "referenceId": {
+          "type": "string",
+          "description": "Associated submissionId or withdrawalId.",
+          "minLength": 2,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Immutable transaction timestamp."
+        }
+      },
+      "required": [
+        "transactionId",
+        "userId",
+        "memberId",
+        "type",
+        "amount",
+        "feeAmount",
+        "netAmount",
+        "direction",
+        "description",
+        "referenceId",
+        "createdAt"
+      ]
+    },
+    "WithdrawalRequest": {
+      "title": "WithdrawalRequest",
+      "description": "Member payout request with mandatory fixed 5 BDT fee breakdown.",
+      "type": "object",
+      "properties": {
+        "withdrawalId": {
+          "type": "string",
+          "description": "Unique withdrawal document ID.",
+          "minLength": 4,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "transactionCode": {
+          "type": "string",
+          "description": "Display transaction code.",
+          "minLength": 8,
+          "maxLength": 25,
+          "pattern": "^WDR-[0-9A-Z\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Requesting member UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "memberId": {
+          "type": "string",
+          "description": "Requesting member ID.",
+          "minLength": 8,
+          "maxLength": 20
+        },
+        "memberName": {
+          "type": "string",
+          "description": "Requesting member full name.",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "payoutMethod": {
+          "type": "string",
+          "description": "Mobile financial service provider.",
+          "enum": ["bKash", "Nagad"],
+          "maxLength": 15
+        },
+        "accountNumber": {
+          "type": "string",
+          "description": "Destination bKash or Nagad mobile wallet number.",
+          "minLength": 11,
+          "maxLength": 15,
+          "pattern": "^(\\+88)?01[3-9][0-9]{8}$"
+        },
+        "grossAmount": {
+          "type": "number",
+          "description": "Total requested withdrawal amount (minimum 100 BDT)."
+        },
+        "feeAmount": {
+          "type": "number",
+          "description": "Fixed withdrawal fee (always 5 BDT)."
+        },
+        "netAmount": {
+          "type": "number",
+          "description": "Net received payout (grossAmount - 5 BDT, minimum 95 BDT)."
+        },
+        "status": {
+          "type": "string",
+          "description": "Payout processing status.",
+          "enum": ["pending", "paid", "rejected"],
+          "maxLength": 15
+        },
+        "adminNote": {
+          "type": "string",
+          "description": "Admin review or rejection note.",
+          "maxLength": 300
+        },
+        "paymentReference": {
+          "type": "string",
+          "description": "External bKash/Nagad TrxID recorded when marked Paid.",
+          "maxLength": 100
+        },
+        "processedBy": {
+          "type": "string",
+          "description": "Admin UID who processed the withdrawal.",
+          "maxLength": 128
+        },
+        "processedAt": {
+          "type": "string",
+          "description": "ISO timestamp when processed.",
+          "maxLength": 40
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Request creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last status change timestamp."
+        }
+      },
+      "required": [
+        "withdrawalId",
+        "transactionCode",
+        "userId",
+        "memberId",
+        "memberName",
+        "payoutMethod",
+        "accountNumber",
+        "grossAmount",
+        "feeAmount",
+        "netAmount",
+        "status",
+        "adminNote",
+        "paymentReference",
+        "processedBy",
+        "processedAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "PasswordChangeRequest": {
+      "title": "PasswordChangeRequest",
+      "description": "Zero-plaintext password change authorization request submitted by a member.",
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "description": "Unique request ID.",
+          "minLength": 4,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Requesting member UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "memberId": {
+          "type": "string",
+          "description": "Requesting member ID.",
+          "minLength": 8,
+          "maxLength": 20
+        },
+        "memberName": {
+          "type": "string",
+          "description": "Requesting member full name.",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "memberEmail": {
+          "type": "string",
+          "format": "email",
+          "description": "Requesting member email.",
+          "minLength": 3,
+          "maxLength": 150
+        },
+        "authProvider": {
+          "type": "string",
+          "description": "Authentication provider of the account.",
+          "enum": ["password", "google.com"],
+          "maxLength": 20
+        },
+        "reason": {
+          "type": "string",
+          "description": "Reason for requesting password change authorization (never contains passwords).",
+          "minLength": 5,
+          "maxLength": 400
+        },
+        "status": {
+          "type": "string",
+          "description": "Approval workflow state.",
+          "enum": ["pending", "approved", "rejected", "completed"],
+          "maxLength": 15
+        },
+        "decisionNote": {
+          "type": "string",
+          "description": "Admin approval or rejection note.",
+          "maxLength": 300
+        },
+        "reviewedBy": {
+          "type": "string",
+          "description": "Admin UID who decided on the request.",
+          "maxLength": 128
+        },
+        "reviewedAt": {
+          "type": "string",
+          "description": "ISO timestamp of Admin decision.",
+          "maxLength": 40
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Request timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update timestamp."
+        }
+      },
+      "required": [
+        "requestId",
+        "userId",
+        "memberId",
+        "memberName",
+        "memberEmail",
+        "authProvider",
+        "reason",
+        "status",
+        "decisionNote",
+        "reviewedBy",
+        "reviewedAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AdminAuditLog": {
+      "title": "AdminAuditLog",
+      "description": "Immutable administrative audit trail recording all privileged state changes.",
+      "type": "object",
+      "properties": {
+        "logId": {
+          "type": "string",
+          "description": "Unique audit log ID.",
+          "minLength": 4,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "adminUid": {
+          "type": "string",
+          "description": "UID of the acting Admin.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "adminEmail": {
+          "type": "string",
+          "format": "email",
+          "description": "Email of the acting Admin.",
+          "minLength": 3,
+          "maxLength": 150
+        },
+        "action": {
+          "type": "string",
+          "description": "Action code (e.g., MEMBER_APPROVED, SUBMISSION_APPROVED, WITHDRAWAL_PAID).",
+          "minLength": 3,
+          "maxLength": 80
+        },
+        "targetType": {
+          "type": "string",
+          "description": "Entity type affected.",
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "targetId": {
+          "type": "string",
+          "description": "Document ID of the affected record.",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "summary": {
+          "type": "string",
+          "description": "Human-readable audit description.",
+          "minLength": 3,
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the administrative action."
+        }
+      },
+      "required": ["logId", "adminUid", "adminEmail", "action", "targetType", "targetId", "summary", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Authoritative RBAC administrator registry."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private member and admin profiles with registration approval states."
+    },
+    "/mediaAssets/{assetId}": {
+      "schema": { "$ref": "#/entities/MediaAsset" },
+      "description": "Isolated compressed image storage for avatars and proof screenshots."
+    },
+    "/tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/TaskItem" },
+      "description": "Admin-managed freelancing tasks with BDT reward amounts."
+    },
+    "/submissions/{submissionId}": {
+      "schema": { "$ref": "#/entities/TaskSubmission" },
+      "description": "Member proof screenshot submissions and Admin review outcomes."
+    },
+    "/wallets/{userId}": {
+      "schema": { "$ref": "#/entities/MemberWallet" },
+      "description": "Atomic member wallets storing available balance, earnings, withdrawals, and fees."
+    },
+    "/transactions/{transactionId}": {
+      "schema": { "$ref": "#/entities/WalletTransaction" },
+      "description": "Immutable ledger history of rewards, withdrawal deductions, payouts, and refunds."
+    },
+    "/withdrawals/{withdrawalId}": {
+      "schema": { "$ref": "#/entities/WithdrawalRequest" },
+      "description": "Member bKash and Nagad withdrawal requests with fixed 5 BDT fee breakdown."
+    },
+    "/passwordChangeRequests/{requestId}": {
+      "schema": { "$ref": "#/entities/PasswordChangeRequest" },
+      "description": "Admin-reviewed password change authorization requests containing zero password data."
+    },
+    "/adminAuditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AdminAuditLog" },
+      "description": "Append-only audit log of all privileged Admin operations."
+    }
+  }
+}

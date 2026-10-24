@@ -1,0 +1,601 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // Global Hardened Primitives
+    // =========================================================================
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerified() && request.auth.token.email == 'mamuncox7918@gmail.com';
+    }
+
+    function isAdmin() {
+      return isVerified() && (
+        request.auth.token.email == 'mamuncox7918@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isApprovedMember() {
+      return isVerified() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status == 'approved';
+    }
+
+    // =========================================================================
+    // Validation Blueprints (Synchronized with firebase-blueprint.json)
+    // =========================================================================
+    function isValidAdminRecord(data) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'createdAt']) &&
+        isValidId(data.uid) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 150 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll([
+          'uid', 'memberId', 'fullName', 'email', 'phone', 'authProvider',
+          'photoAssetId', 'role', 'status', 'rejectionReason',
+          'completedTasksCount', 'pendingSubmissionsCount', 'totalEarnings',
+          'lastPasswordChangedAt', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid', 'memberId', 'fullName', 'email', 'phone', 'authProvider',
+          'photoAssetId', 'role', 'status', 'rejectionReason',
+          'completedTasksCount', 'pendingSubmissionsCount', 'totalEarnings',
+          'lastPasswordChangedAt', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.uid) &&
+        data.memberId is string && data.memberId.size() >= 8 && data.memberId.size() <= 20 && data.memberId.matches('^MTS-[0-9]{6}$') &&
+        data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 100 &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 150 &&
+        data.phone is string && data.phone.size() <= 25 &&
+        data.authProvider is string && data.authProvider.size() <= 20 && data.authProvider in ['password', 'google.com'] &&
+        data.photoAssetId is string && data.photoAssetId.size() <= 128 &&
+        (data.photoAssetId == '' || isValidId(data.photoAssetId)) &&
+        data.role is string && data.role.size() <= 10 && data.role in ['member', 'admin'] &&
+        data.status is string && data.status.size() <= 15 && data.status in ['pending', 'approved', 'rejected'] &&
+        data.rejectionReason is string && data.rejectionReason.size() <= 300 &&
+        data.completedTasksCount is number && data.completedTasksCount >= 0 &&
+        data.pendingSubmissionsCount is number && data.pendingSubmissionsCount >= 0 &&
+        data.totalEarnings is number && data.totalEarnings >= 0 &&
+        data.lastPasswordChangedAt is string && data.lastPasswordChangedAt.size() <= 40 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidMediaAsset(data) {
+      return data.keys().hasAll(['assetId', 'ownerId', 'purpose', 'mimeType', 'dataUrl', 'sizeBytes', 'createdAt']) &&
+        data.keys().hasOnly(['assetId', 'ownerId', 'purpose', 'mimeType', 'dataUrl', 'sizeBytes', 'createdAt']) &&
+        isValidId(data.assetId) &&
+        isValidId(data.ownerId) &&
+        data.purpose is string && data.purpose.size() <= 10 && data.purpose in ['avatar', 'proof'] &&
+        data.mimeType is string && data.mimeType.size() <= 20 && data.mimeType in ['image/webp', 'image/jpeg', 'image/png'] &&
+        data.dataUrl is string && data.dataUrl.size() >= 20 && data.dataUrl.size() <= 250000 &&
+        data.sizeBytes is number && data.sizeBytes > 0 && data.sizeBytes <= 200000 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidTaskItem(data) {
+      return data.keys().hasAll([
+          'taskId', 'taskCode', 'title', 'instructions', 'externalLink',
+          'rewardAmount', 'isActive', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'taskId', 'taskCode', 'title', 'instructions', 'externalLink',
+          'rewardAmount', 'isActive', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.taskId) &&
+        data.taskCode is string && data.taskCode.size() >= 6 && data.taskCode.size() <= 20 && data.taskCode.matches('^TSK-[0-9]{5}$') &&
+        data.title is string && data.title.size() >= 3 && data.title.size() <= 140 &&
+        data.instructions is string && data.instructions.size() >= 5 && data.instructions.size() <= 2000 &&
+        data.externalLink is string && data.externalLink.size() >= 8 && data.externalLink.size() <= 500 &&
+        data.rewardAmount is number && data.rewardAmount >= 1 && data.rewardAmount <= 100000 &&
+        data.isActive is bool &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidTaskSubmission(data) {
+      return data.keys().hasAll([
+          'submissionId', 'taskId', 'taskCode', 'taskTitle', 'rewardAmount',
+          'userId', 'memberId', 'memberName', 'screenshotAssetId', 'submissionNote',
+          'status', 'rejectionReason', 'reviewedBy', 'reviewedAt', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'submissionId', 'taskId', 'taskCode', 'taskTitle', 'rewardAmount',
+          'userId', 'memberId', 'memberName', 'screenshotAssetId', 'proofLink', 'submissionNote',
+          'status', 'rejectionReason', 'reviewedBy', 'reviewedAt', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.submissionId) &&
+        isValidId(data.taskId) &&
+        data.taskCode is string && data.taskCode.size() >= 6 && data.taskCode.size() <= 20 &&
+        data.taskTitle is string && data.taskTitle.size() >= 3 && data.taskTitle.size() <= 140 &&
+        data.rewardAmount is number && data.rewardAmount >= 1 && data.rewardAmount <= 100000 &&
+        isValidId(data.userId) &&
+        data.memberId is string && data.memberId.size() >= 8 && data.memberId.size() <= 20 &&
+        data.memberName is string && data.memberName.size() >= 2 && data.memberName.size() <= 100 &&
+        isValidId(data.screenshotAssetId) &&
+        (!('proofLink' in data) || (
+          data.proofLink is string &&
+          data.proofLink.size() <= 500 &&
+          (data.proofLink == '' || data.proofLink.matches('^https?://.+'))
+        )) &&
+        data.submissionNote is string && data.submissionNote.size() <= 500 &&
+        data.status is string && data.status.size() <= 15 && data.status in ['pending', 'approved', 'rejected'] &&
+        data.rejectionReason is string && data.rejectionReason.size() <= 300 &&
+        data.reviewedBy is string && data.reviewedBy.size() <= 128 &&
+        data.reviewedAt is string && data.reviewedAt.size() <= 40 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidMemberWallet(data) {
+      return data.keys().hasAll([
+          'userId', 'memberId', 'availableBalance', 'totalEarnings',
+          'totalWithdrawals', 'totalWithdrawalFees', 'reservedWithdrawals',
+          'lastWithdrawalId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'userId', 'memberId', 'availableBalance', 'totalEarnings',
+          'totalWithdrawals', 'totalWithdrawalFees', 'reservedWithdrawals',
+          'lastWithdrawalId', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.userId) &&
+        data.memberId is string && data.memberId.size() >= 8 && data.memberId.size() <= 20 &&
+        data.availableBalance is number && data.availableBalance >= 0 &&
+        data.totalEarnings is number && data.totalEarnings >= 0 &&
+        data.totalWithdrawals is number && data.totalWithdrawals >= 0 &&
+        data.totalWithdrawalFees is number && data.totalWithdrawalFees >= 0 &&
+        data.reservedWithdrawals is number && data.reservedWithdrawals >= 0 &&
+        data.lastWithdrawalId is string && data.lastWithdrawalId.size() <= 128 &&
+        (data.lastWithdrawalId == '' || isValidId(data.lastWithdrawalId)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidWalletTransaction(data) {
+      return data.keys().hasAll([
+          'transactionId', 'userId', 'memberId', 'type', 'amount',
+          'feeAmount', 'netAmount', 'direction', 'description', 'referenceId', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'transactionId', 'userId', 'memberId', 'type', 'amount',
+          'feeAmount', 'netAmount', 'direction', 'description', 'referenceId', 'createdAt'
+        ]) &&
+        isValidId(data.transactionId) &&
+        isValidId(data.userId) &&
+        data.memberId is string && data.memberId.size() >= 8 && data.memberId.size() <= 20 &&
+        data.type is string && data.type.size() <= 30 && data.type in ['task_reward', 'withdrawal_request', 'withdrawal_paid', 'withdrawal_refund'] &&
+        data.amount is number && data.amount > 0 &&
+        data.feeAmount is number && data.feeAmount >= 0 &&
+        data.netAmount is number && data.netAmount > 0 &&
+        data.direction is string && data.direction.size() <= 15 && data.direction in ['credit', 'debit', 'settlement'] &&
+        data.description is string && data.description.size() >= 3 && data.description.size() <= 250 &&
+        isValidId(data.referenceId) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidWithdrawalRequest(data) {
+      return data.keys().hasAll([
+          'withdrawalId', 'transactionCode', 'userId', 'memberId', 'memberName',
+          'payoutMethod', 'accountNumber', 'grossAmount', 'feeAmount', 'netAmount',
+          'status', 'adminNote', 'paymentReference', 'processedBy', 'processedAt',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'withdrawalId', 'transactionCode', 'userId', 'memberId', 'memberName',
+          'payoutMethod', 'accountNumber', 'grossAmount', 'feeAmount', 'netAmount',
+          'status', 'adminNote', 'paymentReference', 'processedBy', 'processedAt',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.withdrawalId) &&
+        data.transactionCode is string && data.transactionCode.size() >= 8 && data.transactionCode.size() <= 25 && data.transactionCode.matches('^WDR-[0-9A-Z\\-]+$') &&
+        isValidId(data.userId) &&
+        data.memberId is string && data.memberId.size() >= 8 && data.memberId.size() <= 20 &&
+        data.memberName is string && data.memberName.size() >= 2 && data.memberName.size() <= 100 &&
+        data.payoutMethod is string && data.payoutMethod.size() <= 15 && data.payoutMethod in ['bKash', 'Nagad'] &&
+        data.accountNumber is string && data.accountNumber.size() >= 11 && data.accountNumber.size() <= 15 && data.accountNumber.matches('^(\\+88)?01[3-9][0-9]{8}$') &&
+        data.grossAmount is number && data.grossAmount >= 100 && data.grossAmount <= 500000 &&
+        data.feeAmount is number && data.feeAmount == 5 &&
+        data.netAmount is number && data.netAmount >= 95 && data.netAmount == data.grossAmount - 5 &&
+        data.status is string && data.status.size() <= 15 && data.status in ['pending', 'paid', 'rejected'] &&
+        data.adminNote is string && data.adminNote.size() <= 300 &&
+        data.paymentReference is string && data.paymentReference.size() <= 100 &&
+        data.processedBy is string && data.processedBy.size() <= 128 &&
+        data.processedAt is string && data.processedAt.size() <= 40 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPasswordChangeRequest(data) {
+      return data.keys().hasAll([
+          'requestId', 'userId', 'memberId', 'memberName', 'memberEmail',
+          'authProvider', 'reason', 'status', 'decisionNote', 'reviewedBy',
+          'reviewedAt', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'requestId', 'userId', 'memberId', 'memberName', 'memberEmail',
+          'authProvider', 'reason', 'status', 'decisionNote', 'reviewedBy',
+          'reviewedAt', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.requestId) &&
+        isValidId(data.userId) &&
+        data.memberId is string && data.memberId.size() >= 8 && data.memberId.size() <= 20 &&
+        data.memberName is string && data.memberName.size() >= 2 && data.memberName.size() <= 100 &&
+        data.memberEmail is string && data.memberEmail.size() >= 3 && data.memberEmail.size() <= 150 &&
+        data.authProvider is string && data.authProvider.size() <= 20 && data.authProvider in ['password', 'google.com'] &&
+        data.reason is string && data.reason.size() >= 5 && data.reason.size() <= 400 &&
+        data.status is string && data.status.size() <= 15 && data.status in ['pending', 'approved', 'rejected', 'completed'] &&
+        data.decisionNote is string && data.decisionNote.size() <= 300 &&
+        data.reviewedBy is string && data.reviewedBy.size() <= 128 &&
+        data.reviewedAt is string && data.reviewedAt.size() <= 40 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAdminAuditLog(data) {
+      return data.keys().hasAll([
+          'logId', 'adminUid', 'adminEmail', 'action', 'targetType', 'targetId', 'summary', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'logId', 'adminUid', 'adminEmail', 'action', 'targetType', 'targetId', 'summary', 'createdAt'
+        ]) &&
+        isValidId(data.logId) &&
+        isValidId(data.adminUid) &&
+        data.adminEmail is string && data.adminEmail.size() >= 3 && data.adminEmail.size() <= 150 &&
+        data.action is string && data.action.size() >= 3 && data.action.size() <= 80 &&
+        data.targetType is string && data.targetType.size() >= 2 && data.targetType.size() <= 40 &&
+        data.targetId is string && data.targetId.size() >= 1 && data.targetId.size() <= 128 &&
+        data.summary is string && data.summary.size() >= 3 && data.summary.size() <= 500 &&
+        data.createdAt is timestamp;
+    }
+
+    // =========================================================================
+    // Collection Match Blocks (All 10 Collections)
+    // =========================================================================
+
+    match /admins/{adminId} {
+      allow get: if isVerified() && isValidId(adminId) && (request.auth.uid == adminId || isAdmin());
+      allow list: if false;
+      allow create: if isVerified() && isValidId(adminId) && isValidAdminRecord(incoming()) &&
+        incoming().uid == adminId &&
+        incoming().createdAt == request.time &&
+        isAdmin();
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    match /users/{userId} {
+      allow get: if isVerified() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isVerified() && resource.data.uid == request.auth.uid);
+      allow create: if isVerified() && isValidId(userId) && isValidUserProfile(incoming()) &&
+        incoming().uid == userId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          (
+            request.auth.uid == userId &&
+            incoming().role == 'member' &&
+            incoming().status == 'pending' &&
+            incoming().rejectionReason == '' &&
+            incoming().completedTasksCount == 0 &&
+            incoming().pendingSubmissionsCount == 0 &&
+            incoming().totalEarnings == 0
+          ) || (
+            request.auth.uid == userId &&
+            isAdmin() &&
+            incoming().role == 'admin' &&
+            incoming().status == 'approved' &&
+            incoming().completedTasksCount == 0 &&
+            incoming().pendingSubmissionsCount == 0 &&
+            incoming().totalEarnings == 0
+          )
+        );
+      allow update: if isVerified() && isValidUserProfile(incoming()) && isValidId(userId) &&
+        incoming().uid == existing().uid &&
+        incoming().memberId == existing().memberId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          // Action 1: Admin manages member status, rejection reason, or summary counters
+          (
+            isAdmin() &&
+            incoming().role == existing().role &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'rejectionReason', 'completedTasksCount',
+              'pendingSubmissionsCount', 'totalEarnings', 'updatedAt'
+            ])
+          ) ||
+          // Action 2: Bootstrapped owner elevates own initial profile to admin
+          (
+            isBootstrappedAdmin() &&
+            request.auth.uid == userId &&
+            incoming().role == 'admin' &&
+            incoming().status == 'approved' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['role', 'status', 'updatedAt'])
+          ) ||
+          // Action 3: Owner updates personal profile details
+          (
+            request.auth.uid == userId &&
+            incoming().role == existing().role &&
+            incoming().status == existing().status &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'phone', 'photoAssetId', 'updatedAt'])
+          ) ||
+          // Action 4: Owner records timestamp of approved password change completion
+          (
+            request.auth.uid == userId &&
+            incoming().role == existing().role &&
+            incoming().status == existing().status &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['lastPasswordChangedAt', 'updatedAt'])
+          ) ||
+          // Action 5: Approved owner increments pending submission counter
+          (
+            request.auth.uid == userId &&
+            existing().status == 'approved' &&
+            incoming().role == existing().role &&
+            incoming().status == existing().status &&
+            incoming().pendingSubmissionsCount == existing().pendingSubmissionsCount + 1 &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['pendingSubmissionsCount', 'updatedAt'])
+          )
+        );
+      allow delete: if false;
+    }
+
+    match /mediaAssets/{assetId} {
+      allow get: if isVerified() && isValidId(assetId) && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow list: if false;
+      allow create: if isVerified() && isValidId(assetId) && isValidMediaAsset(incoming()) &&
+        incoming().assetId == assetId &&
+        incoming().ownerId == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid));
+      allow update: if false;
+      allow delete: if isVerified() && isValidId(assetId) &&
+        resource.data.ownerId == request.auth.uid &&
+        resource.data.purpose == 'avatar';
+    }
+
+    match /tasks/{taskId} {
+      allow get: if isVerified() && isValidId(taskId) && (
+        (resource.data.isActive == true && isApprovedMember()) ||
+        isAdmin()
+      );
+      allow list: if isBootstrappedAdmin() || (isVerified() && resource.data.isActive == true);
+      allow create: if isVerified() && isValidId(taskId) && isValidTaskItem(incoming()) &&
+        incoming().taskId == taskId &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+      allow update: if isVerified() && isValidTaskItem(incoming()) && isValidId(taskId) &&
+        incoming().taskId == existing().taskId &&
+        incoming().taskCode == existing().taskCode &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'title', 'instructions', 'externalLink', 'rewardAmount', 'isActive', 'updatedAt'
+        ]) &&
+        isAdmin();
+      allow delete: if false;
+    }
+
+    match /submissions/{submissionId} {
+      allow get: if isVerified() && isValidId(submissionId) && (resource.data.userId == request.auth.uid || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isVerified() && resource.data.userId == request.auth.uid);
+      allow create: if isVerified() && isValidId(submissionId) && isValidTaskSubmission(incoming()) &&
+        incoming().submissionId == submissionId &&
+        incoming().userId == request.auth.uid &&
+        incoming().status == 'pending' &&
+        incoming().rejectionReason == '' &&
+        incoming().reviewedBy == '' &&
+        incoming().reviewedAt == '' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isApprovedMember() &&
+        exists(/databases/$(database)/documents/tasks/$(incoming().taskId)) &&
+        get(/databases/$(database)/documents/tasks/$(incoming().taskId)).data.isActive == true &&
+        get(/databases/$(database)/documents/tasks/$(incoming().taskId)).data.rewardAmount == incoming().rewardAmount &&
+        exists(/databases/$(database)/documents/mediaAssets/$(incoming().screenshotAssetId)) &&
+        get(/databases/$(database)/documents/mediaAssets/$(incoming().screenshotAssetId)).data.ownerId == request.auth.uid;
+      allow update: if isVerified() && isValidTaskSubmission(incoming()) && isValidId(submissionId) &&
+        incoming().submissionId == existing().submissionId &&
+        incoming().taskId == existing().taskId &&
+        incoming().userId == existing().userId &&
+        incoming().rewardAmount == existing().rewardAmount &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        existing().status == 'pending' &&
+        (incoming().status == 'approved' || incoming().status == 'rejected') &&
+        incoming().reviewedBy == request.auth.uid &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'status', 'rejectionReason', 'reviewedBy', 'reviewedAt', 'updatedAt'
+        ]) &&
+        isAdmin();
+      allow delete: if false;
+    }
+
+    match /wallets/{userId} {
+      allow get: if isVerified() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isVerified() && resource.data.userId == request.auth.uid);
+      allow create: if isVerified() && isValidId(userId) && isValidMemberWallet(incoming()) &&
+        incoming().userId == userId &&
+        incoming().availableBalance == 0 &&
+        incoming().totalEarnings == 0 &&
+        incoming().totalWithdrawals == 0 &&
+        incoming().totalWithdrawalFees == 0 &&
+        incoming().reservedWithdrawals == 0 &&
+        incoming().lastWithdrawalId == '' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (request.auth.uid == userId || isAdmin());
+      allow update: if isVerified() && isValidMemberWallet(incoming()) && isValidId(userId) &&
+        incoming().userId == existing().userId &&
+        incoming().memberId == existing().memberId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          // Action 1: Admin settlement (task reward credit, withdrawal paid, withdrawal refund)
+          (
+            isAdmin() &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'availableBalance', 'totalEarnings', 'totalWithdrawals',
+              'totalWithdrawalFees', 'reservedWithdrawals', 'updatedAt'
+            ])
+          ) ||
+          // Action 2: Atomic member withdrawal reservation verified via getAfter
+          (
+            request.auth.uid == userId &&
+            isApprovedMember() &&
+            isValidId(incoming().lastWithdrawalId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'availableBalance', 'reservedWithdrawals', 'lastWithdrawalId', 'updatedAt'
+            ]) &&
+            incoming().availableBalance < existing().availableBalance &&
+            (existing().availableBalance - incoming().availableBalance) >= 100 &&
+            incoming().reservedWithdrawals == existing().reservedWithdrawals + (existing().availableBalance - incoming().availableBalance) &&
+            !exists(/databases/$(database)/documents/withdrawals/$(incoming().lastWithdrawalId)) &&
+            getAfter(/databases/$(database)/documents/withdrawals/$(incoming().lastWithdrawalId)).data.userId == request.auth.uid &&
+            getAfter(/databases/$(database)/documents/withdrawals/$(incoming().lastWithdrawalId)).data.grossAmount == (existing().availableBalance - incoming().availableBalance)
+          )
+        );
+      allow delete: if false;
+    }
+
+    match /transactions/{transactionId} {
+      allow get: if isVerified() && isValidId(transactionId) && (resource.data.userId == request.auth.uid || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isVerified() && resource.data.userId == request.auth.uid);
+      allow create: if isVerified() && isValidId(transactionId) && isValidWalletTransaction(incoming()) &&
+        incoming().transactionId == transactionId &&
+        incoming().createdAt == request.time && (
+          isAdmin() ||
+          (
+            incoming().userId == request.auth.uid &&
+            incoming().type == 'withdrawal_request' &&
+            incoming().direction == 'debit' &&
+            incoming().amount >= 100 &&
+            incoming().feeAmount == 5 &&
+            incoming().netAmount == incoming().amount - 5 &&
+            !exists(/databases/$(database)/documents/withdrawals/$(incoming().referenceId)) &&
+            getAfter(/databases/$(database)/documents/withdrawals/$(incoming().referenceId)).data.userId == request.auth.uid &&
+            getAfter(/databases/$(database)/documents/withdrawals/$(incoming().referenceId)).data.grossAmount == incoming().amount
+          )
+        );
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    match /withdrawals/{withdrawalId} {
+      allow get: if isVerified() && isValidId(withdrawalId) && (resource.data.userId == request.auth.uid || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isVerified() && resource.data.userId == request.auth.uid);
+      allow create: if isVerified() && isValidId(withdrawalId) && isValidWithdrawalRequest(incoming()) &&
+        incoming().withdrawalId == withdrawalId &&
+        incoming().userId == request.auth.uid &&
+        incoming().status == 'pending' &&
+        incoming().adminNote == '' &&
+        incoming().paymentReference == '' &&
+        incoming().processedBy == '' &&
+        incoming().processedAt == '' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isApprovedMember() &&
+        get(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.availableBalance >= incoming().grossAmount &&
+        getAfter(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.availableBalance == get(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.availableBalance - incoming().grossAmount;
+      allow update: if isVerified() && isValidWithdrawalRequest(incoming()) && isValidId(withdrawalId) &&
+        incoming().withdrawalId == existing().withdrawalId &&
+        incoming().userId == existing().userId &&
+        incoming().grossAmount == existing().grossAmount &&
+        incoming().feeAmount == existing().feeAmount &&
+        incoming().netAmount == existing().netAmount &&
+        incoming().payoutMethod == existing().payoutMethod &&
+        incoming().accountNumber == existing().accountNumber &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        existing().status == 'pending' &&
+        (incoming().status == 'paid' || incoming().status == 'rejected') &&
+        incoming().processedBy == request.auth.uid &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'status', 'adminNote', 'paymentReference', 'processedBy', 'processedAt', 'updatedAt'
+        ]) &&
+        isAdmin();
+      allow delete: if false;
+    }
+
+    match /passwordChangeRequests/{requestId} {
+      allow get: if isVerified() && isValidId(requestId) && (resource.data.userId == request.auth.uid || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isVerified() && resource.data.userId == request.auth.uid);
+      allow create: if isVerified() && isValidId(requestId) && isValidPasswordChangeRequest(incoming()) &&
+        incoming().requestId == requestId &&
+        incoming().userId == request.auth.uid &&
+        incoming().status == 'pending' &&
+        incoming().decisionNote == '' &&
+        incoming().reviewedBy == '' &&
+        incoming().reviewedAt == '' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isApprovedMember();
+      allow update: if isVerified() && isValidPasswordChangeRequest(incoming()) && isValidId(requestId) &&
+        incoming().requestId == existing().requestId &&
+        incoming().userId == existing().userId &&
+        incoming().reason == existing().reason &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          // Action 1: Admin approves or rejects a pending request
+          (
+            isAdmin() &&
+            existing().status == 'pending' &&
+            (incoming().status == 'approved' || incoming().status == 'rejected') &&
+            incoming().reviewedBy == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'decisionNote', 'reviewedBy', 'reviewedAt', 'updatedAt'
+            ])
+          ) ||
+          // Action 2: Requesting member marks approved request completed after updating auth password
+          (
+            request.auth.uid == existing().userId &&
+            existing().status == 'approved' &&
+            incoming().status == 'completed' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          )
+        );
+      allow delete: if false;
+    }
+
+    match /adminAuditLogs/{logId} {
+      allow get: if isVerified() && isValidId(logId) && isAdmin();
+      allow list: if isBootstrappedAdmin() || (isBootstrappedAdmin() && resource.data.adminUid == request.auth.uid);
+      allow create: if isVerified() && isValidId(logId) && isValidAdminAuditLog(incoming()) &&
+        incoming().logId == logId &&
+        incoming().adminUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        isAdmin();
+      allow update: if false;
+      allow delete: if false;
+    }
+  }
+}

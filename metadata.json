@@ -1,0 +1,6 @@
+{
+  "name": "MTS Freelancing Zone",
+  "description": "Mobile-first freelancing platform for managing member tasks, proof submissions, atomic wallets, earnings, and bKash/Nagad withdrawals.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
