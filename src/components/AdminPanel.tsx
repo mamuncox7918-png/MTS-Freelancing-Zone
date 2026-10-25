@@ -8,6 +8,8 @@ import {
   Plus,
   Search,
   ShieldCheck,
+  UserCheck,
+  UserPlus,
   X,
   XCircle,
 } from 'lucide-react';
@@ -16,6 +18,11 @@ import { apiRequest, formatBdt, formatDateTime, formatShortDate, toMillis } from
 import { AvatarDisplay, ProofScreenshotViewer } from './MediaView';
 import {
   AdminAuditLog,
+  AssistantAdminRecord,
+  BD_MOBILE_PATTERN,
+  CustomTaskAssistantStatus,
+  CustomTaskSubmission,
+  MAX_NAME_LENGTH,
   MAX_REASON_LENGTH,
   MAX_TASK_INSTRUCTIONS_LENGTH,
   MAX_TASK_TITLE_LENGTH,
@@ -31,8 +38,10 @@ import {
 export type AdminTab =
   | 'overview'
   | 'members'
+  | 'assistants'
   | 'tasks'
   | 'submissions'
+  | 'custom_tasks'
   | 'completed'
   | 'withdrawals'
   | 'ledger'
@@ -59,9 +68,11 @@ export function AdminPanel({
   };
 
   const [users, setUsers] = useState<UserProfile[]>([]);
+  const [assistantRecords, setAssistantRecords] = useState<AssistantAdminRecord[]>([]);
   const [wallets, setWallets] = useState<MemberWallet[]>([]);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [submissions, setSubmissions] = useState<TaskSubmission[]>([]);
+  const [customTasks, setCustomTasks] = useState<CustomTaskSubmission[]>([]);
   const [withdrawals, setWithdrawals] = useState<WithdrawalRequest[]>([]);
   const [transactions, setTransactions] = useState<WalletTransaction[]>([]);
   const [passwordRequests, setPasswordRequests] = useState<PasswordChangeRequest[]>([]);
@@ -78,6 +89,15 @@ export function AdminPanel({
   const [rejectingMemberUid, setRejectingMemberUid] = useState<string | null>(null);
   const [memberRejectReason, setMemberRejectReason] = useState('');
   const [inspectedMember, setInspectedMember] = useState<UserProfile | null>(null);
+  const [inspectorRejectSubId, setInspectorRejectSubId] = useState<string | null>(null);
+  const [inspectorRejectReason, setInspectorRejectReason] = useState('');
+
+  // Assistant Admin creation & management state
+  const [asstFullName, setAsstFullName] = useState('');
+  const [asstEmail, setAsstEmail] = useState('');
+  const [asstPassword, setAsstPassword] = useState('');
+  const [asstPhone, setAsstPhone] = useState('');
+  const [promoteSearch, setPromoteSearch] = useState('');
 
   // Task creation & editing
   const [taskModalOpen, setTaskModalOpen] = useState(false);
@@ -92,6 +112,13 @@ export function AdminPanel({
   const [subFilter, setSubFilter] = useState<'pending' | 'approved' | 'rejected'>('pending');
   const [rejectingSubId, setRejectingSubId] = useState<string | null>(null);
   const [subRejectReason, setSubRejectReason] = useState('');
+
+  // Custom task review & payment state
+  const [ctFilter, setCtFilter] = useState<'pending' | 'approved' | 'rejected'>('pending');
+  const [ctSearch, setCtSearch] = useState('');
+  const [ctApprovedAmounts, setCtApprovedAmounts] = useState<Record<string, string>>({});
+  const [rejectingCtId, setRejectingCtId] = useState<string | null>(null);
+  const [ctRejectReason, setCtRejectReason] = useState('');
 
   // Completed records & ledger search
   const [completedSearch, setCompletedSearch] = useState('');
@@ -183,6 +210,24 @@ export function AdminPanel({
         },
         (err) => handleFirestoreError(err, OperationType.LIST, 'adminAuditLogs')
       ),
+      onSnapshot(
+        collection(db, 'customTasks'),
+        (snap) => {
+          const list = snap.docs.map((d) => d.data() as CustomTaskSubmission);
+          list.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+          setCustomTasks(list);
+        },
+        (err) => handleFirestoreError(err, OperationType.LIST, 'customTasks')
+      ),
+      onSnapshot(
+        collection(db, 'assistantAdmins'),
+        (snap) => {
+          const list = snap.docs.map((d) => d.data() as AssistantAdminRecord);
+          list.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+          setAssistantRecords(list);
+        },
+        (err) => handleFirestoreError(err, OperationType.LIST, 'assistantAdmins')
+      ),
     ];
 
     return () => unsubs.forEach((u) => u());
@@ -200,13 +245,25 @@ export function AdminPanel({
     return map;
   }, [users]);
 
+  const activeAssistantUidSet = useMemo(() => {
+    const set = new Set<string>();
+    for (const a of assistantRecords) set.add(a.uid);
+    return set;
+  }, [assistantRecords]);
+
   const stats = useMemo(() => {
     const membersOnly = users.filter((u) => u.role === 'member');
+    const assistantUsers = users.filter((u) => u.role === 'assistant_admin');
+    const activeAssistantsCount = assistantUsers.filter(
+      (u) => u.status === 'approved' && activeAssistantUidSet.has(u.uid)
+    ).length;
     const pendingMembers = membersOnly.filter((u) => u.status === 'pending').length;
     const approvedMembers = membersOnly.filter((u) => u.status === 'approved').length;
     const activeTasks = tasks.filter((t) => t.isActive).length;
     const pendingProofs = submissions.filter((s) => s.status === 'pending').length;
     const approvedProofs = submissions.filter((s) => s.status === 'approved').length;
+    const pendingCustomTasks = customTasks.filter((c) => c.status === 'pending').length;
+    const approvedCustomTasks = customTasks.filter((c) => c.status === 'approved').length;
     const pendingWithdrawals = withdrawals.filter((w) => w.status === 'pending');
     const paidWithdrawals = withdrawals.filter((w) => w.status === 'paid');
 
@@ -221,11 +278,15 @@ export function AdminPanel({
 
     return {
       totalMembers: membersOnly.length,
+      totalAssistants: assistantUsers.length,
+      activeAssistantsCount,
       pendingMembers,
       approvedMembers,
       activeTasks,
       pendingProofs,
       approvedProofs,
+      pendingCustomTasks,
+      approvedCustomTasks,
       pendingWithdrawalsCount: pendingWithdrawals.length,
       pendingReservedBdt,
       totalRewardsCredited,
@@ -234,7 +295,16 @@ export function AdminPanel({
       totalFeesCollected,
       pendingPasswordReqs: passwordRequests.filter((p) => p.status === 'pending').length,
     };
-  }, [users, wallets, tasks, submissions, withdrawals, passwordRequests]);
+  }, [
+    users,
+    activeAssistantUidSet,
+    wallets,
+    tasks,
+    submissions,
+    customTasks,
+    withdrawals,
+    passwordRequests,
+  ]);
 
   useEffect(() => {
     if (!banner || banner.type !== 'success') return;
@@ -388,10 +458,13 @@ export function AdminPanel({
     const trimmedReason = (overrideReason !== undefined ? overrideReason : subRejectReason)
       .trim()
       .slice(0, MAX_REASON_LENGTH);
-    const finalReason =
-      decision === 'rejected'
-        ? trimmedReason || 'Submitted proof did not match task instructions'
-        : '';
+
+    if (decision === 'rejected' && trimmedReason.length < 3) {
+      const msg = 'Please enter a rejection reason (at least 3 characters) when rejecting a task.';
+      setCardError({ id: submissionId, text: msg });
+      setBanner({ type: 'error', text: msg });
+      return;
+    }
 
     setBusyId(submissionId);
     setBusyDecision(decision);
@@ -400,17 +473,19 @@ export function AdminPanel({
         method: 'POST',
         body: {
           decision,
-          rejectionReason: finalReason,
+          rejectionReason: decision === 'rejected' ? trimmedReason : '',
         },
       });
       setRejectingSubId(null);
       setSubRejectReason('');
+      setInspectorRejectSubId(null);
+      setInspectorRejectReason('');
       setBanner({
         type: 'success',
         text:
           decision === 'approved'
             ? 'Proof approved and task reward credited to member wallet.'
-            : 'Proof rejected.',
+            : 'Proof rejected and reason recorded.',
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Submission review failed.';
@@ -418,6 +493,163 @@ export function AdminPanel({
       setBanner({
         type: 'error',
         text: msg,
+      });
+    } finally {
+      setBusyId(null);
+      setBusyDecision(null);
+    }
+  };
+
+  const handleCustomTaskDecision = async (
+    ct: CustomTaskSubmission,
+    decision: 'approved' | 'rejected'
+  ) => {
+    setBanner(null);
+    setCardError(null);
+
+    const rawAmountStr =
+      ctApprovedAmounts[ct.customTaskId] !== undefined
+        ? ctApprovedAmounts[ct.customTaskId]
+        : String(ct.requestedAmount);
+    const parsedAmount = Number(rawAmountStr);
+
+    if (
+      decision === 'approved' &&
+      (!Number.isFinite(parsedAmount) ||
+        !Number.isInteger(parsedAmount) ||
+        parsedAmount < 1 ||
+        parsedAmount > 100000)
+    ) {
+      const msg = 'Approved payment amount must be a whole Taka integer between ৳1 and ৳100,000.';
+      setCardError({ id: ct.customTaskId, text: msg });
+      setBanner({ type: 'error', text: msg });
+      return;
+    }
+
+    const trimmedReason = ctRejectReason.trim().slice(0, MAX_REASON_LENGTH);
+    if (decision === 'rejected' && trimmedReason.length < 3) {
+      const msg =
+        'Please enter a rejection reason (at least 3 characters) when rejecting a custom task.';
+      setCardError({ id: ct.customTaskId, text: msg });
+      setBanner({ type: 'error', text: msg });
+      return;
+    }
+
+    setBusyId(ct.customTaskId);
+    setBusyDecision(decision);
+    try {
+      await apiRequest(`/api/admin/custom-tasks/${ct.customTaskId}/decision`, {
+        method: 'POST',
+        body: {
+          decision,
+          approvedAmount: decision === 'approved' ? parsedAmount : 0,
+          rejectionReason: decision === 'rejected' ? trimmedReason : '',
+        },
+      });
+      setRejectingCtId(null);
+      setCtRejectReason('');
+      setBanner({
+        type: 'success',
+        text:
+          decision === 'approved'
+            ? `Custom task ${ct.customTaskCode} approved and ${formatBdt(parsedAmount)} credited to ${ct.memberName}'s wallet.`
+            : `Custom task ${ct.customTaskCode} rejected and member notified.`,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Custom task decision failed.';
+      setCardError({ id: ct.customTaskId, text: msg });
+      setBanner({ type: 'error', text: msg });
+    } finally {
+      setBusyId(null);
+      setBusyDecision(null);
+    }
+  };
+
+  const handleCreateAssistantAdmin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBanner(null);
+
+    const cleanName = asstFullName.trim().slice(0, MAX_NAME_LENGTH);
+    const cleanEmail = asstEmail.trim().toLowerCase();
+    const cleanPhone = asstPhone.trim();
+
+    if (cleanName.length < 2) {
+      setBanner({ type: 'error', text: 'Full Name must be at least 2 characters.' });
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setBanner({ type: 'error', text: 'Enter a valid email address.' });
+      return;
+    }
+    if (asstPassword.length < 6) {
+      setBanner({ type: 'error', text: 'Password must be at least 6 characters.' });
+      return;
+    }
+    if (cleanPhone && !BD_MOBILE_PATTERN.test(cleanPhone)) {
+      setBanner({
+        type: 'error',
+        text: 'Enter a valid Bangladeshi mobile number (e.g., 01712345678) or leave blank.',
+      });
+      return;
+    }
+
+    setBusyId('create_assistant');
+    try {
+      const res = await apiRequest<{ memberId?: string }>('/api/admin/assistants', {
+        method: 'POST',
+        body: {
+          fullName: cleanName,
+          email: cleanEmail,
+          password: asstPassword,
+          phone: cleanPhone,
+        },
+      });
+      setAsstFullName('');
+      setAsstEmail('');
+      setAsstPassword('');
+      setAsstPhone('');
+      setBanner({
+        type: 'success',
+        text: `Assistant Admin account ${res.memberId ? `(${res.memberId}) ` : ''}created! They can now log in directly to the Assistant Admin Dashboard.`,
+      });
+    } catch (err) {
+      setBanner({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to create Assistant Admin account.',
+      });
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleManageAssistantRole = async (
+    targetUid: string,
+    action: 'promote' | 'suspend' | 'reactivate' | 'demote'
+  ) => {
+    setBanner(null);
+    setBusyId(targetUid);
+    setBusyDecision(action);
+    try {
+      await apiRequest(`/api/admin/assistants/${targetUid}/role`, {
+        method: 'POST',
+        body: { action },
+      });
+      setPromoteSearch('');
+      setBanner({
+        type: 'success',
+        text:
+          action === 'promote'
+            ? 'Account promoted to Assistant Admin.'
+            : action === 'suspend'
+            ? 'Assistant Admin access suspended.'
+            : action === 'reactivate'
+            ? 'Assistant Admin access reactivated.'
+            : 'Account returned to standard Member role.',
+      });
+    } catch (err) {
+      setBanner({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Could not update Assistant Admin role.',
       });
     } finally {
       setBusyId(null);
@@ -533,15 +765,79 @@ export function AdminPanel({
         !q ||
         t.memberId.toLowerCase().includes(q) ||
         t.description.toLowerCase().includes(q) ||
-        t.type.toLowerCase().includes(q)
+        t.type.toLowerCase().includes(q) ||
+        (t.taskName || '').toLowerCase().includes(q) ||
+        (t.submissionId || '').toLowerCase().includes(q) ||
+        (t.referenceId || '').toLowerCase().includes(q)
     );
   }, [transactions, ledgerSearch]);
+
+  const filteredCustomTasks = useMemo(() => {
+    const q = ctSearch.trim().toLowerCase();
+    return customTasks
+      .filter((c) => c.status === ctFilter)
+      .filter(
+        (c) =>
+          !q ||
+          c.memberName.toLowerCase().includes(q) ||
+          c.memberId.toLowerCase().includes(q) ||
+          c.customTaskCode.toLowerCase().includes(q) ||
+          c.taskName.toLowerCase().includes(q) ||
+          c.taskDetails.toLowerCase().includes(q)
+      );
+  }, [customTasks, ctFilter, ctSearch]);
+
+  const assistantUsers = useMemo(
+    () => users.filter((u) => u.role === 'assistant_admin'),
+    [users]
+  );
+
+  const promotableMembers = useMemo(() => {
+    const q = promoteSearch.trim().toLowerCase();
+    if (!q) return [];
+    return users
+      .filter((u) => u.role === 'member' && u.status === 'approved')
+      .filter(
+        (u) =>
+          u.fullName.toLowerCase().includes(q) ||
+          u.memberId.toLowerCase().includes(q) ||
+          u.email.toLowerCase().includes(q)
+      )
+      .slice(0, 6);
+  }, [users, promoteSearch]);
+
+  const formatAssistantBadge = (status: CustomTaskAssistantStatus) => {
+    switch (status) {
+      case 'recommended_approve':
+        return {
+          label: 'Assistant Recommended Approval',
+          cls: 'bg-emerald-500/15 border-emerald-400/35 text-emerald-300',
+        };
+      case 'recommended_reject':
+        return {
+          label: 'Assistant Recommended Rejection',
+          cls: 'bg-rose-500/15 border-rose-400/35 text-rose-300',
+        };
+      case 'reviewed':
+        return {
+          label: 'Assistant Reviewed',
+          cls: 'bg-sky-500/15 border-sky-400/35 text-sky-200',
+        };
+      default:
+        return {
+          label: 'Unreviewed by Assistant',
+          cls: 'bg-white/6 border-white/12 text-sky-200/70',
+        };
+    }
+  };
 
   const navItems: { id: AdminTab; label: string }[] = [
     { id: 'overview', label: 'Overview' },
     { id: 'members', label: `Members (${stats.pendingMembers})` },
+    { id: 'assistants', label: `Assistant Admins (${stats.activeAssistantsCount})` },
     { id: 'tasks', label: `Tasks (${tasks.length})` },
     { id: 'submissions', label: `Proofs (${stats.pendingProofs})` },
+    { id: 'custom_tasks', label: `Custom Tasks (${stats.pendingCustomTasks})` },
     { id: 'completed', label: 'Completed' },
     { id: 'withdrawals', label: `Withdrawals (${stats.pendingWithdrawalsCount})` },
     { id: 'ledger', label: 'Ledger' },
@@ -683,6 +979,49 @@ export function AdminPanel({
               <p className="mt-1 text-xs font-mono tabular-nums text-sky-200/60">
                 Paid Net: {formatBdt(stats.totalPaidNet)} · Fees: {formatBdt(stats.totalFeesCollected)}
               </p>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <button
+              type="button"
+              onClick={() => {
+                setCtFilter('pending');
+                setActiveTab('custom_tasks');
+              }}
+              className="text-left rounded-2xl bg-[#0D1730]/95 border border-teal-400/30 p-5 flex items-center justify-between gap-4"
+            >
+              <div>
+                <p className="text-xs text-sky-200/75">Pending Custom Task Payments</p>
+                <p className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-teal-300">
+                  {stats.pendingCustomTasks}
+                </p>
+                <p className="mt-1 text-xs text-sky-200/60">
+                  {stats.approvedCustomTasks} custom tasks paid · Final Main Admin approval required
+                </p>
+              </div>
+              <span className="min-h-[38px] px-3 rounded-xl bg-teal-500/15 text-teal-200 text-xs font-semibold inline-flex items-center shrink-0">
+                Review Custom Tasks
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('assistants')}
+              className="text-left rounded-2xl bg-[#0D1730]/95 border border-sky-400/30 p-5 flex items-center justify-between gap-4"
+            >
+              <div>
+                <p className="text-xs text-sky-200/75">Assistant Admins</p>
+                <p className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-white">
+                  {stats.activeAssistantsCount}
+                </p>
+                <p className="mt-1 text-xs text-sky-200/60">
+                  {stats.totalAssistants} total accounts · Create & manage reviewers
+                </p>
+              </div>
+              <span className="min-h-[38px] px-3 rounded-xl bg-white/8 text-sky-100 text-xs font-semibold inline-flex items-center shrink-0">
+                Manage Assistants
+              </span>
             </button>
           </div>
 
@@ -1064,8 +1403,45 @@ export function AdminPanel({
                         </p>
                       )}
 
-                      {sub.status === 'rejected' && sub.rejectionReason && (
-                        <p className="text-xs text-rose-300">Rejected: {sub.rejectionReason}</p>
+                      {sub.status !== 'pending' && (
+                        <div className="p-3 rounded-xl bg-[#070E20] border border-white/10 space-y-1 text-xs">
+                          <p
+                            className={`font-semibold inline-flex items-center gap-1.5 ${
+                              sub.status === 'approved' ? 'text-emerald-400' : 'text-rose-400'
+                            }`}
+                          >
+                            {sub.status === 'approved' ? (
+                              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                            ) : (
+                              <XCircle className="w-3.5 h-3.5 shrink-0" />
+                            )}
+                            <span className="capitalize">
+                              {sub.reviewAction || sub.status} ·{' '}
+                              {sub.status === 'approved'
+                                ? `Credited ${formatBdt(sub.rewardAmount)}`
+                                : 'No Wallet Credit'}
+                            </span>
+                          </p>
+                          {(sub.reviewerId || sub.reviewedBy) && (
+                            <p className="text-[11px] font-mono tabular-nums text-sky-200/65">
+                              Reviewer: {sub.reviewerId || sub.reviewedBy}
+                              {sub.reviewerName ? ` (${sub.reviewerName})` : ''}
+                              {sub.reviewerRole
+                                ? ` · ${sub.reviewerRole === 'admin' ? 'Main Admin' : 'Assistant Admin'}`
+                                : ''}
+                            </p>
+                          )}
+                          {sub.reviewedAt && (
+                            <p className="text-[11px] font-mono tabular-nums text-sky-200/55">
+                              Reviewed At: {formatDateTime(sub.reviewedAt)}
+                            </p>
+                          )}
+                          {sub.status === 'rejected' && sub.rejectionReason && (
+                            <p className="text-xs text-rose-300 pt-1">
+                              Reason: {sub.rejectionReason}
+                            </p>
+                          )}
+                        </div>
                       )}
                     </div>
 
@@ -1110,10 +1486,11 @@ export function AdminPanel({
                           <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-400/25 space-y-2.5">
                             <input
                               type="text"
+                              required
                               maxLength={MAX_REASON_LENGTH}
                               value={subRejectReason}
                               onChange={(e) => setSubRejectReason(e.target.value)}
-                              placeholder="Optional reason (or tap Confirm Reject directly)..."
+                              placeholder="Required rejection reason (minimum 3 characters)..."
                               className="w-full min-h-[42px] px-3 rounded-xl bg-[#070E20] border border-white/15 text-xs text-white"
                             />
                             <div className="grid grid-cols-2 gap-2">
@@ -1148,6 +1525,524 @@ export function AdminPanel({
                 })}
             </div>
           )}
+        </div>
+      )}
+
+      {/* 4B. CUSTOM TASKS REVIEW & FINAL PAYMENT APPROVAL */}
+      {activeTab === 'custom_tasks' && (
+        <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row gap-3 justify-between">
+            <div className="flex items-center gap-1 p-1 rounded-xl bg-[#081022] border border-white/10 w-fit overflow-x-auto">
+              {(['pending', 'approved', 'rejected'] as const).map((st) => (
+                <button
+                  key={st}
+                  type="button"
+                  onClick={() => setCtFilter(st)}
+                  className={`min-h-[38px] px-3.5 rounded-lg text-xs font-semibold capitalize whitespace-nowrap ${
+                    ctFilter === st
+                      ? 'bg-teal-500 text-slate-950'
+                      : 'text-sky-200/75 hover:text-white'
+                  }`}
+                >
+                  {st === 'pending'
+                    ? `Pending Payment (${stats.pendingCustomTasks})`
+                    : st === 'approved'
+                    ? 'Approved & Paid'
+                    : 'Rejected'}
+                </button>
+              ))}
+            </div>
+
+            <div className="relative flex-1 sm:max-w-xs">
+              <Search className="w-4 h-4 text-sky-200/50 absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="search"
+                value={ctSearch}
+                onChange={(e) => setCtSearch(e.target.value)}
+                placeholder="Search member, ID, custom task..."
+                className="w-full min-h-[42px] pl-10 pr-3 rounded-xl bg-[#0D1730] border border-white/12 text-xs sm:text-sm text-white"
+              />
+            </div>
+          </div>
+
+          {filteredCustomTasks.length === 0 ? (
+            <div className="rounded-2xl bg-[#0D1730]/90 border border-white/10 p-10 text-center text-sm text-sky-200/70">
+              No custom task submissions in this status.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {filteredCustomTasks.map((ct) => {
+                const ctMember = userByUid.get(ct.userId);
+                const badge = formatAssistantBadge(ct.assistantStatus);
+                const currentAmountStr =
+                  ctApprovedAmounts[ct.customTaskId] !== undefined
+                    ? ctApprovedAmounts[ct.customTaskId]
+                    : String(ct.requestedAmount);
+
+                return (
+                  <div
+                    key={ct.customTaskId}
+                    className="rounded-2xl bg-[#0D1730]/95 border border-white/10 p-5 flex flex-col justify-between gap-4"
+                  >
+                    <div className="space-y-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-start gap-3 min-w-0">
+                          <AvatarDisplay
+                            photoAssetId={ctMember?.photoAssetId}
+                            fullName={ct.memberName}
+                            sizeClass="w-10 h-10 text-xs"
+                            zoomable
+                          />
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-1.5 text-xs font-mono tabular-nums text-sky-200/70">
+                              <span className="text-teal-300 font-semibold">
+                                {ct.customTaskCode}
+                              </span>
+                              <span aria-hidden="true">·</span>
+                              <button
+                                type="button"
+                                onClick={() => ctMember && setInspectedMember(ctMember)}
+                                className="text-white hover:underline font-semibold text-left"
+                              >
+                                {ct.memberId} ({ct.memberName})
+                              </button>
+                            </div>
+                            <h3 className="text-base font-bold text-white mt-0.5">{ct.taskName}</h3>
+                            <p className="text-[11px] font-mono tabular-nums text-sky-200/55">
+                              Submitted {formatDateTime(ct.createdAt)}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="text-right shrink-0">
+                          <p className="text-[11px] text-sky-200/65">Requested</p>
+                          <p className="text-lg font-bold font-mono tabular-nums text-amber-300">
+                            {formatBdt(ct.requestedAmount)}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="p-3.5 rounded-xl bg-white/[0.03] border border-white/8 space-y-1">
+                        <p className="text-[11px] font-semibold text-sky-200/70">Task Details</p>
+                        <p className="text-xs sm:text-sm text-sky-100 whitespace-pre-line leading-relaxed">
+                          {ct.taskDetails}
+                        </p>
+                      </div>
+
+                      {ct.screenshotAssetId ? (
+                        <ProofScreenshotViewer
+                          assetId={ct.screenshotAssetId}
+                          title={`${ct.memberName} (${ct.memberId}) · ${ct.taskName}`}
+                        />
+                      ) : (
+                        <div className="p-3 rounded-xl bg-[#070E20] border border-white/10 text-xs text-sky-200/60 text-center">
+                          No screenshot uploaded (Optional proof)
+                        </div>
+                      )}
+
+                      {/* Assistant Admin Inspection Summary */}
+                      <div className="p-3 rounded-xl bg-[#070E20]/80 border border-white/10 space-y-1.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span
+                            className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold ${badge.cls}`}
+                          >
+                            {badge.label}
+                          </span>
+                          {ct.assistantReviewedAt && (
+                            <span className="text-[11px] font-mono tabular-nums text-sky-200/60">
+                              {ct.assistantReviewerId || 'Assistant'}{' '}
+                              {ct.assistantReviewerName ? `(${ct.assistantReviewerName})` : ''} ·{' '}
+                              {formatDateTime(ct.assistantReviewedAt)}
+                            </span>
+                          )}
+                        </div>
+                        {ct.assistantNote && (
+                          <p className="text-xs text-sky-100/85">
+                            Assistant Note: {ct.assistantNote}
+                          </p>
+                        )}
+                      </div>
+
+                      {ct.status !== 'pending' && (
+                        <div className="p-3 rounded-xl bg-[#070E20] border border-white/10 space-y-1 text-xs">
+                          <p
+                            className={`font-semibold inline-flex items-center gap-1.5 ${
+                              ct.status === 'approved' ? 'text-emerald-400' : 'text-rose-400'
+                            }`}
+                          >
+                            {ct.status === 'approved' ? (
+                              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                            ) : (
+                              <XCircle className="w-3.5 h-3.5 shrink-0" />
+                            )}
+                            <span>
+                              {ct.status === 'approved'
+                                ? `Approved & Credited ${formatBdt(ct.approvedAmount)}`
+                                : 'Rejected — No Wallet Credit'}
+                            </span>
+                          </p>
+                          <p className="text-[11px] font-mono tabular-nums text-sky-200/65">
+                            Main Admin: {ct.reviewerId || 'ADMIN'}
+                            {ct.reviewerName ? ` (${ct.reviewerName})` : ''} ·{' '}
+                            {formatDateTime(ct.reviewedAt)}
+                          </p>
+                          {ct.transactionId && (
+                            <p className="text-[11px] font-mono tabular-nums text-teal-300/85">
+                              Ledger Ref: {ct.transactionId}
+                            </p>
+                          )}
+                          {ct.status === 'rejected' && ct.rejectionReason && (
+                            <p className="text-xs text-rose-300 pt-1">
+                              Reason: {ct.rejectionReason}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {ct.status === 'pending' && (
+                      <div className="pt-3 border-t border-white/10 space-y-3">
+                        {cardError?.id === ct.customTaskId && (
+                          <div className="p-3 rounded-xl bg-rose-500/12 border border-rose-400/30 text-xs text-rose-200">
+                            {cardError.text}
+                          </div>
+                        )}
+
+                        <div>
+                          <label className="block text-[11px] font-medium text-sky-200/80 mb-1">
+                            Approved Payment Amount (BDT)
+                          </label>
+                          <input
+                            type="number"
+                            min={1}
+                            max={100000}
+                            step={1}
+                            value={currentAmountStr}
+                            onChange={(e) =>
+                              setCtApprovedAmounts((prev) => ({
+                                ...prev,
+                                [ct.customTaskId]: e.target.value,
+                              }))
+                            }
+                            className="w-full min-h-[42px] px-3.5 rounded-xl bg-[#070E20] border border-white/15 text-sm font-mono tabular-nums font-bold text-teal-300"
+                          />
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2.5">
+                          <button
+                            type="button"
+                            disabled={busyId === ct.customTaskId}
+                            onClick={() => handleCustomTaskDecision(ct, 'approved')}
+                            className="min-h-[46px] px-3 rounded-xl bg-teal-500 hover:bg-teal-400 active:scale-[0.99] disabled:opacity-50 text-slate-950 text-xs font-semibold transition-all cursor-pointer"
+                          >
+                            {busyId === ct.customTaskId && busyDecision === 'approved'
+                              ? 'Crediting...'
+                              : `Approve & Pay ৳${currentAmountStr || ct.requestedAmount}`}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busyId === ct.customTaskId}
+                            onClick={() => {
+                              setRejectingCtId(ct.customTaskId);
+                              setCtRejectReason(
+                                ct.assistantStatus === 'recommended_reject' ? ct.assistantNote : ''
+                              );
+                              setCardError(null);
+                            }}
+                            className={`min-h-[46px] px-3 rounded-xl text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer ${
+                              rejectingCtId === ct.customTaskId
+                                ? 'bg-rose-500/30 border border-rose-400/40 text-rose-200'
+                                : 'bg-rose-500/15 hover:bg-rose-500/25 text-rose-300'
+                            }`}
+                          >
+                            Reject Request
+                          </button>
+                        </div>
+
+                        {rejectingCtId === ct.customTaskId && (
+                          <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-400/25 space-y-2.5">
+                            <input
+                              type="text"
+                              required
+                              maxLength={MAX_REASON_LENGTH}
+                              value={ctRejectReason}
+                              onChange={(e) => setCtRejectReason(e.target.value)}
+                              placeholder="Required rejection reason for member notification..."
+                              className="w-full min-h-[42px] px-3 rounded-xl bg-[#070E20] border border-white/15 text-xs text-white"
+                            />
+                            <div className="grid grid-cols-2 gap-2">
+                              <button
+                                type="button"
+                                disabled={busyId === ct.customTaskId}
+                                onClick={() => {
+                                  setRejectingCtId(null);
+                                  setCtRejectReason('');
+                                }}
+                                className="min-h-[42px] px-3 rounded-xl bg-white/8 hover:bg-white/12 text-xs font-medium text-white"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busyId === ct.customTaskId}
+                                onClick={() => handleCustomTaskDecision(ct, 'rejected')}
+                                className="min-h-[42px] px-3.5 rounded-xl bg-rose-500 hover:bg-rose-400 disabled:opacity-50 text-slate-950 text-xs font-semibold whitespace-nowrap cursor-pointer"
+                              >
+                                {busyId === ct.customTaskId && busyDecision === 'rejected'
+                                  ? 'Rejecting...'
+                                  : 'Confirm Reject'}
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 4C. ASSISTANT ADMIN ACCOUNTS MANAGEMENT */}
+      {activeTab === 'assistants' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          {/* Left: Create New Assistant Admin + Promote Existing */}
+          <div className="lg:col-span-5 space-y-5">
+            <form
+              onSubmit={handleCreateAssistantAdmin}
+              className="rounded-2xl bg-[#0D1730]/95 border border-white/10 p-5 sm:p-6 space-y-4"
+            >
+              <div className="flex items-center gap-2.5">
+                <UserPlus className="w-5 h-5 text-teal-300 shrink-0" />
+                <div>
+                  <h2 className="text-base font-bold text-white">Create Assistant Admin</h2>
+                  <p className="text-xs text-sky-200/70">
+                    Provision login credentials for the dedicated Assistant Admin Dashboard.
+                  </p>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-sky-200/80 mb-1">Full Name</label>
+                <input
+                  type="text"
+                  required
+                  maxLength={MAX_NAME_LENGTH}
+                  value={asstFullName}
+                  onChange={(e) => setAsstFullName(e.target.value)}
+                  placeholder="e.g., Assistant Reviewer"
+                  className="w-full min-h-[44px] px-3.5 rounded-xl bg-[#070E20] border border-white/15 text-sm text-white"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-sky-200/80 mb-1">
+                  Login Email Address
+                </label>
+                <input
+                  type="email"
+                  required
+                  maxLength={150}
+                  value={asstEmail}
+                  onChange={(e) => setAsstEmail(e.target.value)}
+                  placeholder="assistant@example.com"
+                  className="w-full min-h-[44px] px-3.5 rounded-xl bg-[#070E20] border border-white/15 text-sm text-white"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-sky-200/80 mb-1">
+                  Initial Password (min 6 characters)
+                </label>
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  maxLength={128}
+                  value={asstPassword}
+                  onChange={(e) => setAsstPassword(e.target.value)}
+                  placeholder="Enter strong password"
+                  className="w-full min-h-[44px] px-3.5 rounded-xl bg-[#070E20] border border-white/15 text-sm text-white"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-sky-200/80 mb-1">
+                  Mobile Number (Optional)
+                </label>
+                <input
+                  type="tel"
+                  maxLength={15}
+                  value={asstPhone}
+                  onChange={(e) => setAsstPhone(e.target.value)}
+                  placeholder="01712345678"
+                  className="w-full min-h-[44px] px-3.5 rounded-xl bg-[#070E20] border border-white/15 text-sm font-mono tabular-nums text-white"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={busyId === 'create_assistant'}
+                className="w-full min-h-[46px] px-4 rounded-xl bg-teal-500 hover:bg-teal-400 disabled:opacity-50 text-slate-950 font-semibold text-sm transition-colors"
+              >
+                {busyId === 'create_assistant'
+                  ? 'Creating Assistant Account...'
+                  : 'Create Assistant Admin Account'}
+              </button>
+            </form>
+
+            {/* Promote Existing Registered Member */}
+            <div className="rounded-2xl bg-[#0D1730]/95 border border-white/10 p-5 space-y-3">
+              <h3 className="text-sm font-bold text-white">Promote Existing Member</h3>
+              <p className="text-xs text-sky-200/70">
+                Search an existing approved member by ID, name, or email to assign Assistant Admin
+                access.
+              </p>
+              <div className="relative">
+                <Search className="w-4 h-4 text-sky-200/50 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                <input
+                  type="search"
+                  value={promoteSearch}
+                  onChange={(e) => setPromoteSearch(e.target.value)}
+                  placeholder="Search member ID, name, or email..."
+                  className="w-full min-h-[42px] pl-10 pr-3 rounded-xl bg-[#070E20] border border-white/15 text-xs sm:text-sm text-white"
+                />
+              </div>
+
+              {promotableMembers.length > 0 && (
+                <div className="divide-y divide-white/8 rounded-xl bg-[#070E20] border border-white/10 px-3">
+                  {promotableMembers.map((m) => (
+                    <div
+                      key={m.uid}
+                      className="py-2.5 flex items-center justify-between gap-2 text-xs"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-white font-semibold truncate">
+                          {m.fullName} ({m.memberId})
+                        </p>
+                        <p className="text-sky-200/65 truncate">{m.email}</p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={busyId === m.uid}
+                        onClick={() => handleManageAssistantRole(m.uid, 'promote')}
+                        className="min-h-[36px] px-3 rounded-lg bg-teal-500 hover:bg-teal-400 disabled:opacity-50 text-slate-950 font-semibold shrink-0"
+                      >
+                        Promote
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Right: Manage Existing Assistant Admins */}
+          <div className="lg:col-span-7 rounded-2xl bg-[#0D1730]/95 border border-white/10 overflow-hidden">
+            <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <UserCheck className="w-4 h-4 text-teal-300" />
+                <h2 className="text-base font-semibold text-white">
+                  Assistant Admin Accounts ({assistantUsers.length})
+                </h2>
+              </div>
+              <span className="text-xs font-mono tabular-nums text-teal-300">
+                {stats.activeAssistantsCount} Active
+              </span>
+            </div>
+
+            {assistantUsers.length === 0 ? (
+              <div className="p-10 text-center space-y-2">
+                <p className="text-sm font-semibold text-white">No Assistant Admins created yet</p>
+                <p className="text-xs text-sky-200/65 max-w-md mx-auto">
+                  Use the form on the left to create an Assistant Admin account. Assistant Admins
+                  can review official task proofs and inspect custom task requests without access to
+                  withdrawals, manual wallet edits, or admin creation.
+                </p>
+              </div>
+            ) : (
+              <div className="divide-y divide-white/8">
+                {assistantUsers.map((asst) => {
+                  const isActive =
+                    asst.status === 'approved' && activeAssistantUidSet.has(asst.uid);
+
+                  return (
+                    <div key={asst.uid} className="p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                      <div className="flex items-center gap-3.5 min-w-0">
+                        <AvatarDisplay
+                          photoAssetId={asst.photoAssetId}
+                          fullName={asst.fullName}
+                          sizeClass="w-12 h-12 text-sm"
+                        />
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="flex flex-wrap items-center gap-1.5 text-xs font-mono tabular-nums">
+                            <span className="text-teal-300 font-semibold">{asst.memberId}</span>
+                            <span aria-hidden="true" className="text-sky-200/50">
+                              ·
+                            </span>
+                            <span
+                              className={
+                                isActive
+                                  ? 'text-emerald-400 font-semibold'
+                                  : 'text-rose-300 font-semibold'
+                              }
+                            >
+                              {isActive ? 'Active Assistant Admin' : 'Suspended'}
+                            </span>
+                          </div>
+                          <p className="text-sm sm:text-base font-bold text-white truncate">
+                            {asst.fullName}
+                          </p>
+                          <p className="text-xs text-sky-200/70 truncate">
+                            {asst.email}
+                            {asst.phone ? ` · ${asst.phone}` : ''}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        {isActive ? (
+                          <button
+                            type="button"
+                            disabled={busyId === asst.uid}
+                            onClick={() => handleManageAssistantRole(asst.uid, 'suspend')}
+                            className="min-h-[38px] px-3.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 disabled:opacity-50 text-amber-300 text-xs font-semibold"
+                          >
+                            {busyId === asst.uid && busyDecision === 'suspend'
+                              ? 'Suspending...'
+                              : 'Suspend'}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={busyId === asst.uid}
+                            onClick={() => handleManageAssistantRole(asst.uid, 'reactivate')}
+                            className="min-h-[38px] px-3.5 rounded-xl bg-teal-500 hover:bg-teal-400 disabled:opacity-50 text-slate-950 text-xs font-semibold"
+                          >
+                            {busyId === asst.uid && busyDecision === 'reactivate'
+                              ? 'Activating...'
+                              : 'Reactivate'}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          disabled={busyId === asst.uid}
+                          onClick={() => handleManageAssistantRole(asst.uid, 'demote')}
+                          className="min-h-[38px] px-3.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 disabled:opacity-50 text-rose-300 text-xs font-semibold"
+                        >
+                          {busyId === asst.uid && busyDecision === 'demote'
+                            ? 'Updating...'
+                            : 'Demote to Member'}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -1201,6 +2096,7 @@ export function AdminPanel({
                           {rec.memberId} · {rec.memberName}
                         </button>{' '}
                         · Approved {formatDateTime(rec.reviewedAt || rec.updatedAt)}
+                        {rec.reviewerId ? ` · Reviewer ${rec.reviewerId}` : ''}
                       </p>
                       {rec.proofLink && (
                         <a
@@ -1364,7 +2260,8 @@ export function AdminPanel({
                   <div>
                     <p className="text-xs sm:text-sm font-medium text-white">{tx.description}</p>
                     <p className="text-[11px] font-mono tabular-nums text-sky-200/60">
-                      {tx.memberId} · {tx.type} · {formatDateTime(tx.createdAt)}
+                      {tx.memberId} · {tx.type} · {formatDateTime(tx.approvedAt || tx.createdAt)}
+                      {tx.submissionId ? ` · Submission ${tx.submissionId}` : ''}
                     </p>
                   </div>
                   <span
@@ -1894,33 +2791,58 @@ export function AdminPanel({
                               </a>
                             )}
                             {s.status === 'pending' && (
-                              <div className="flex items-center gap-2 pt-1">
-                                <button
-                                  type="button"
-                                  disabled={busyId === s.submissionId}
-                                  onClick={() => handleReviewSubmission(s.submissionId, 'approved')}
-                                  className="min-h-[36px] px-3 rounded-lg bg-teal-500 hover:bg-teal-400 disabled:opacity-50 text-slate-950 text-xs font-semibold"
-                                >
-                                  {busyId === s.submissionId && busyDecision === 'approved'
-                                    ? 'Approving...'
-                                    : `Approve ${formatBdt(s.rewardAmount)}`}
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={busyId === s.submissionId}
-                                  onClick={() =>
-                                    handleReviewSubmission(
-                                      s.submissionId,
-                                      'rejected',
-                                      'Submitted proof did not match task instructions'
-                                    )
-                                  }
-                                  className="min-h-[36px] px-3 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 disabled:opacity-50 text-rose-200 text-xs font-semibold"
-                                >
-                                  {busyId === s.submissionId && busyDecision === 'rejected'
-                                    ? 'Rejecting...'
-                                    : 'Reject'}
-                                </button>
+                              <div className="space-y-2 pt-1">
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    type="button"
+                                    disabled={busyId === s.submissionId}
+                                    onClick={() =>
+                                      handleReviewSubmission(s.submissionId, 'approved')
+                                    }
+                                    className="min-h-[36px] px-3 rounded-lg bg-teal-500 hover:bg-teal-400 disabled:opacity-50 text-slate-950 text-xs font-semibold"
+                                  >
+                                    {busyId === s.submissionId && busyDecision === 'approved'
+                                      ? 'Approving...'
+                                      : `Approve ${formatBdt(s.rewardAmount)}`}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={busyId === s.submissionId}
+                                    onClick={() => {
+                                      setInspectorRejectSubId(s.submissionId);
+                                      setInspectorRejectReason('');
+                                    }}
+                                    className="min-h-[36px] px-3 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 disabled:opacity-50 text-rose-200 text-xs font-semibold"
+                                  >
+                                    Reject
+                                  </button>
+                                </div>
+                                {inspectorRejectSubId === s.submissionId && (
+                                  <div className="flex flex-col sm:flex-row gap-2">
+                                    <input
+                                      type="text"
+                                      maxLength={MAX_REASON_LENGTH}
+                                      value={inspectorRejectReason}
+                                      onChange={(e) => setInspectorRejectReason(e.target.value)}
+                                      placeholder="Required rejection reason..."
+                                      className="flex-1 min-h-[36px] px-2.5 rounded-lg bg-[#0B142C] border border-white/15 text-xs text-white"
+                                    />
+                                    <button
+                                      type="button"
+                                      disabled={busyId === s.submissionId}
+                                      onClick={() =>
+                                        handleReviewSubmission(
+                                          s.submissionId,
+                                          'rejected',
+                                          inspectorRejectReason
+                                        )
+                                      }
+                                      className="min-h-[36px] px-3 rounded-lg bg-rose-500 text-slate-950 text-xs font-semibold"
+                                    >
+                                      Confirm Reject
+                                    </button>
+                                  </div>
+                                )}
                               </div>
                             )}
                           </div>

@@ -11,6 +11,7 @@ googleProvider.setCustomParameters({ prompt: 'select_account' });
 
 export const FIREBASE_PROJECT_ID = firebaseConfig.projectId;
 export const FIREBASE_DATABASE_ID = firebaseConfig.firestoreDatabaseId;
+export const FIREBASE_API_KEY = firebaseConfig.apiKey;
 export const BOOTSTRAPPED_ADMIN_EMAIL = 'mamuncox7918@gmail.com';
 
 export enum OperationType {

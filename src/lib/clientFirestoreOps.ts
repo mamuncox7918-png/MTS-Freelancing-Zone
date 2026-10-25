@@ -12,6 +12,7 @@ import {
   auth,
   BOOTSTRAPPED_ADMIN_EMAIL,
   db,
+  FIREBASE_API_KEY,
   handleFirestoreError,
   OperationType,
 } from './firebase';
@@ -629,30 +630,53 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
     }
   }
 
-  // 11. Admin: POST /api/admin/submissions/:submissionId/review
+  // 11. Admin or Assistant Admin: POST /api/admin/submissions/:submissionId/review
   const subReviewMatch = path.match(/^\/api\/admin\/submissions\/([a-zA-Z0-9_\-]+)\/review$/);
   if (method === 'POST' && subReviewMatch) {
     const submissionId = subReviewMatch[1];
     const decision = body.decision;
     const rawReason = typeof body.rejectionReason === 'string' ? body.rejectionReason.trim().slice(0, 300) : '';
-    const rejectionReason =
-      decision === 'rejected'
-        ? rawReason || 'Submitted proof did not match task instructions'
-        : '';
     if (decision !== 'approved' && decision !== 'rejected') {
       throw new Error('Decision must be approved or rejected.');
     }
+    if (decision === 'rejected' && rawReason.length < 3) {
+      throw new Error('Please enter a rejection reason (at least 3 characters) when rejecting a task.');
+    }
+    const rejectionReason = decision === 'rejected' ? rawReason : '';
 
     try {
-      const subSnap = await getDoc(doc(db, 'submissions', submissionId));
+      const [subSnap, callerProfileSnap, assistantSnap] = await Promise.all([
+        getDoc(doc(db, 'submissions', submissionId)),
+        getDoc(doc(db, 'users', uid)),
+        getDoc(doc(db, 'assistantAdmins', uid)),
+      ]);
       if (!subSnap.exists()) throw new Error('Submission not found.');
       const subData = subSnap.data();
       if (subData.status !== 'pending') {
-        throw new Error(`Submission has already been ${subData.status}.`);
+        throw new Error(`Submission has already been ${subData.status}. Duplicate review blocked.`);
       }
+
+      const callerProfile = callerProfileSnap.exists() ? callerProfileSnap.data() : null;
+      const reviewerRole: 'admin' | 'assistant_admin' = isInitialAdmin
+        ? 'admin'
+        : assistantSnap.exists() && callerProfile?.status === 'approved'
+        ? 'assistant_admin'
+        : callerProfile?.role === 'admin' && Boolean(currentUser.emailVerified)
+        ? 'admin'
+        : (() => {
+            throw new Error('Admin or Assistant Admin authorization required.');
+          })();
+      const reviewerId = String(
+        callerProfile?.memberId || (assistantSnap.exists() ? assistantSnap.data().memberId : 'ADMIN')
+      );
+      const reviewerName = String(
+        callerProfile?.fullName || (assistantSnap.exists() ? assistantSnap.data().fullName : 'Admin')
+      );
 
       const memberUid = String(subData.userId);
       const memberCode = String(subData.memberId || 'MTS-000000');
+      const taskTitle = String(subData.taskTitle || 'Official Task').slice(0, 400);
+      const taskCode = String(subData.taskCode || 'TSK-00000');
       const rewardAmount = Number(subData.rewardAmount);
       const [memberSnap, walletSnap] = await Promise.all([
         getDoc(doc(db, 'users', memberUid)),
@@ -661,23 +685,30 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
 
       const nowIso = new Date().toISOString();
       const logId = randomDocId('log');
+      const notifId = randomDocId('ntf');
       const batch = writeBatch(db);
 
       batch.update(doc(db, 'submissions', submissionId), {
         status: decision,
         rejectionReason,
         reviewedBy: uid,
+        reviewerId,
+        reviewerName,
+        reviewerRole,
+        reviewAction: decision,
         reviewedAt: nowIso,
         updatedAt: serverTimestamp(),
       });
 
       if (decision === 'approved') {
-        const txId = randomDocId('tx');
+        // Deterministic ledger ID prevents duplicate wallet credits for the same submission
+        const txId = `tx_reward_${submissionId}`;
         if (walletSnap.exists()) {
           const walletData = walletSnap.data();
           batch.update(doc(db, 'wallets', memberUid), {
             availableBalance: Number(walletData.availableBalance || 0) + rewardAmount,
             totalEarnings: Number(walletData.totalEarnings || 0) + rewardAmount,
+            lastCreditedSubmissionId: submissionId,
             updatedAt: serverTimestamp(),
           });
         } else {
@@ -690,6 +721,7 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
             totalWithdrawalFees: 0,
             reservedWithdrawals: 0,
             lastWithdrawalId: '',
+            lastCreditedSubmissionId: submissionId,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
@@ -714,18 +746,38 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
           feeAmount: 0,
           netAmount: rewardAmount,
           direction: 'credit',
-          description: `Task reward credited for ${subData.taskCode} (${String(subData.taskTitle || '').slice(0, 140)})`.slice(0, 240),
+          description: `Task reward credited for ${taskCode} (${taskTitle.slice(0, 140)})`.slice(0, 240),
           referenceId: submissionId,
+          taskName: taskTitle,
+          submissionId,
+          approvedAt: nowIso,
           createdAt: serverTimestamp(),
+        });
+        batch.set(doc(db, 'notifications', notifId), {
+          notificationId: notifId,
+          userId: memberUid,
+          type: 'task_approved',
+          title: 'Official Task Approved',
+          message: `Your proof for "${taskTitle}" (${taskCode}) was approved and ৳${rewardAmount} was credited to your wallet.`.slice(
+            0,
+            900
+          ),
+          referenceId: submissionId,
+          isRead: false,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
         });
         batch.set(doc(db, 'adminAuditLogs', logId), {
           logId,
           adminUid: uid,
-          adminEmail: email,
+          adminEmail: email || reviewerId,
           action: 'SUBMISSION_APPROVED',
           targetType: 'submission',
           targetId: submissionId,
-          summary: `Approved proof for ${subData.taskCode} by ${memberCode} and credited ৳${rewardAmount}`.slice(0, 450),
+          summary: `[${reviewerRole === 'admin' ? 'Main Admin' : 'Assistant Admin'} ${reviewerId}] Approved proof for ${taskCode} by ${memberCode} and credited ৳${rewardAmount}`.slice(
+            0,
+            450
+          ),
           createdAt: serverTimestamp(),
         });
       } else {
@@ -736,14 +788,31 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
             updatedAt: serverTimestamp(),
           });
         }
+        batch.set(doc(db, 'notifications', notifId), {
+          notificationId: notifId,
+          userId: memberUid,
+          type: 'task_rejected',
+          title: 'Official Task Proof Rejected',
+          message: `Your proof for "${taskTitle}" (${taskCode}) was rejected. Reason: ${rejectionReason}`.slice(
+            0,
+            900
+          ),
+          referenceId: submissionId,
+          isRead: false,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
         batch.set(doc(db, 'adminAuditLogs', logId), {
           logId,
           adminUid: uid,
-          adminEmail: email,
+          adminEmail: email || reviewerId,
           action: 'SUBMISSION_REJECTED',
           targetType: 'submission',
           targetId: submissionId,
-          summary: `Rejected proof for ${subData.taskCode} by ${memberCode}: ${rejectionReason}`.slice(0, 450),
+          summary: `[${reviewerRole === 'admin' ? 'Main Admin' : 'Assistant Admin'} ${reviewerId}] Rejected proof for ${taskCode} by ${memberCode}: ${rejectionReason}`.slice(
+            0,
+            450
+          ),
           createdAt: serverTimestamp(),
         });
       }
@@ -900,6 +969,588 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
       return { ok: true } as unknown as T;
     } catch (err) {
       wrapPermError(err, OperationType.UPDATE, `passwordChangeRequests/${requestId}`);
+    }
+  }
+
+  // 14. Main Admin: POST /api/admin/assistants (Create Assistant Admin Account)
+  if (method === 'POST' && path === '/api/admin/assistants') {
+    if (!currentUser.emailVerified || !isInitialAdmin) {
+      const adminSnap = await getDoc(doc(db, 'admins', uid));
+      if (!currentUser.emailVerified || !adminSnap.exists()) {
+        throw new Error('Main Administrator authorization required.');
+      }
+    }
+
+    const fullName = typeof body.fullName === 'string' ? body.fullName.trim().slice(0, 100) : '';
+    const targetEmail = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+    const password = typeof body.password === 'string' ? body.password : '';
+    const phone = typeof body.phone === 'string' ? body.phone.trim().slice(0, 25) : '';
+
+    if (fullName.length < 2) {
+      throw new Error('Assistant Admin full name must be between 2 and 100 characters.');
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(targetEmail) || targetEmail.length > 150) {
+      throw new Error('Enter a valid email address for the Assistant Admin.');
+    }
+    if (password.length < 6 || password.length > 128) {
+      throw new Error('Password must be between 6 and 128 characters.');
+    }
+    if (phone && !BD_PHONE_REGEX.test(phone)) {
+      throw new Error('Enter a valid Bangladeshi phone number (e.g., 01712345678).');
+    }
+
+    const signUpRes = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${encodeURIComponent(FIREBASE_API_KEY)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: targetEmail,
+          password,
+          returnSecureToken: true,
+        }),
+      }
+    );
+    const signUpBody = (await signUpRes.json().catch(() => ({}))) as {
+      localId?: string;
+      idToken?: string;
+      error?: { message?: string };
+    };
+    if (!signUpRes.ok || !signUpBody.localId) {
+      const code = signUpBody.error?.message || '';
+      if (code.includes('EMAIL_EXISTS')) {
+        throw new Error(
+          'An account with this email already exists. Promote that existing account directly in the Assistant Admins section.'
+        );
+      }
+      if (code.includes('OPERATION_NOT_ALLOWED')) {
+        throw new Error(
+          'Email/Password sign-in is disabled in Firebase Console. Enable Email/Password or promote a Google-registered member.'
+        );
+      }
+      throw new Error(`Could not create Assistant Admin credentials: ${code || 'Invalid input'}`);
+    }
+
+    const newUid = signUpBody.localId;
+    if (signUpBody.idToken) {
+      await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:update?key=${encodeURIComponent(FIREBASE_API_KEY)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            idToken: signUpBody.idToken,
+            displayName: fullName,
+            returnSecureToken: false,
+          }),
+        }
+      ).catch(() => undefined);
+    }
+
+    const memberId = randomNumericCode('MTS', 6);
+    const logId = randomDocId('log');
+
+    try {
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'assistantAdmins', newUid), {
+        uid: newUid,
+        memberId,
+        fullName,
+        email: targetEmail,
+        createdBy: uid,
+        createdAt: serverTimestamp(),
+      });
+      batch.set(doc(db, 'users', newUid), {
+        uid: newUid,
+        memberId,
+        fullName,
+        email: targetEmail,
+        phone,
+        authProvider: 'password',
+        photoAssetId: '',
+        role: 'assistant_admin',
+        status: 'approved',
+        rejectionReason: '',
+        completedTasksCount: 0,
+        pendingSubmissionsCount: 0,
+        totalEarnings: 0,
+        lastPasswordChangedAt: '',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      batch.set(doc(db, 'wallets', newUid), {
+        userId: newUid,
+        memberId,
+        availableBalance: 0,
+        totalEarnings: 0,
+        totalWithdrawals: 0,
+        totalWithdrawalFees: 0,
+        reservedWithdrawals: 0,
+        lastWithdrawalId: '',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      batch.set(doc(db, 'adminAuditLogs', logId), {
+        logId,
+        adminUid: uid,
+        adminEmail: email,
+        action: 'ASSISTANT_ADMIN_CREATED',
+        targetType: 'assistantAdmin',
+        targetId: newUid,
+        summary: `Created Assistant Admin account ${memberId} (${fullName} · ${targetEmail})`.slice(0, 450),
+        createdAt: serverTimestamp(),
+      });
+      await batch.commit();
+      return { ok: true, uid: newUid, memberId } as unknown as T;
+    } catch (err) {
+      wrapPermError(err, OperationType.CREATE, `assistantAdmins/${newUid}`);
+    }
+  }
+
+  // 15. Main Admin: POST /api/admin/assistants/:targetUid/role
+  const assistantRoleMatch = path.match(/^\/api\/admin\/assistants\/([a-zA-Z0-9_\-]+)\/role$/);
+  if (method === 'POST' && assistantRoleMatch) {
+    const targetUid = assistantRoleMatch[1];
+    const action = body.action;
+    const reason = typeof body.reason === 'string' ? body.reason.trim().slice(0, 300) : '';
+
+    if (action !== 'promote' && action !== 'suspend' && action !== 'reactivate' && action !== 'demote') {
+      throw new Error('Action must be promote, suspend, reactivate, or demote.');
+    }
+
+    try {
+      const [targetSnap, existingAssistantSnap] = await Promise.all([
+        getDoc(doc(db, 'users', targetUid)),
+        getDoc(doc(db, 'assistantAdmins', targetUid)),
+      ]);
+      if (!targetSnap.exists()) throw new Error('Target account not found.');
+      const targetData = targetSnap.data();
+      if (targetData.role === 'admin' || targetUid === uid) {
+        throw new Error('Cannot modify Main Admin role.');
+      }
+
+      const logId = randomDocId('log');
+      const batch = writeBatch(db);
+
+      if (action === 'promote' || action === 'reactivate') {
+        batch.update(doc(db, 'users', targetUid), {
+          role: 'assistant_admin',
+          status: 'approved',
+          rejectionReason: '',
+          updatedAt: serverTimestamp(),
+        });
+        if (!existingAssistantSnap.exists()) {
+          batch.set(doc(db, 'assistantAdmins', targetUid), {
+            uid: targetUid,
+            memberId: String(targetData.memberId),
+            fullName: String(targetData.fullName),
+            email: String(targetData.email),
+            createdBy: uid,
+            createdAt: serverTimestamp(),
+          });
+        }
+      } else if (action === 'suspend') {
+        batch.update(doc(db, 'users', targetUid), {
+          role: 'assistant_admin',
+          status: 'rejected',
+          rejectionReason: reason || 'Assistant Admin access suspended by Main Admin',
+          updatedAt: serverTimestamp(),
+        });
+        if (existingAssistantSnap.exists()) {
+          batch.delete(doc(db, 'assistantAdmins', targetUid));
+        }
+      } else {
+        batch.update(doc(db, 'users', targetUid), {
+          role: 'member',
+          status: 'approved',
+          rejectionReason: '',
+          updatedAt: serverTimestamp(),
+        });
+        if (existingAssistantSnap.exists()) {
+          batch.delete(doc(db, 'assistantAdmins', targetUid));
+        }
+      }
+
+      batch.set(doc(db, 'adminAuditLogs', logId), {
+        logId,
+        adminUid: uid,
+        adminEmail: email,
+        action: `ASSISTANT_ADMIN_${String(action).toUpperCase()}`,
+        targetType: 'assistantAdmin',
+        targetId: targetUid,
+        summary: `${String(action).toUpperCase()} Assistant Admin role for ${targetData.memberId} (${targetData.fullName})`.slice(
+          0,
+          450
+        ),
+        createdAt: serverTimestamp(),
+      });
+      await batch.commit();
+      return { ok: true } as unknown as T;
+    } catch (err) {
+      wrapPermError(err, OperationType.UPDATE, `users/${targetUid}`);
+    }
+  }
+
+  // 16. Approved Member: POST /api/custom-tasks (Never credits wallet on submit)
+  if (method === 'POST' && path === '/api/custom-tasks') {
+    const taskName = typeof body.taskName === 'string' ? body.taskName.trim().slice(0, 140) : '';
+    const taskDetails = typeof body.taskDetails === 'string' ? body.taskDetails.trim().slice(0, 2000) : '';
+    const requestedAmount = Number(body.requestedAmount);
+    const screenshotAssetId =
+      typeof body.screenshotAssetId === 'string' ? body.screenshotAssetId.trim() : '';
+
+    if (taskName.length < 2) {
+      throw new Error('Task Name must be at least 2 characters.');
+    }
+    if (taskDetails.length < 5) {
+      throw new Error('Task Details must be at least 5 characters.');
+    }
+    if (!Number.isFinite(requestedAmount) || !Number.isInteger(requestedAmount) || requestedAmount < 1 || requestedAmount > 100000) {
+      throw new Error('Requested Amount must be a whole Taka integer between ৳1 and ৳100,000.');
+    }
+    if (screenshotAssetId && !VALID_ID_REGEX.test(screenshotAssetId)) {
+      throw new Error('Invalid proof screenshot reference.');
+    }
+
+    const customTaskId = randomDocId('ctk');
+    const customTaskCode = randomNumericCode('CTK', 5);
+
+    try {
+      const userSnap = await getDoc(doc(db, 'users', uid));
+      if (!userSnap.exists() || userSnap.data().status !== 'approved') {
+        throw new Error('Your account must be approved before submitting a custom task.');
+      }
+      const profileData = userSnap.data();
+
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'customTasks', customTaskId), {
+        customTaskId,
+        customTaskCode,
+        userId: uid,
+        memberId: String(profileData.memberId),
+        memberName: String(profileData.fullName),
+        taskName,
+        taskDetails,
+        requestedAmount,
+        approvedAmount: 0,
+        screenshotAssetId,
+        status: 'pending',
+        assistantStatus: 'unreviewed',
+        assistantNote: '',
+        assistantReviewedBy: '',
+        assistantReviewerId: '',
+        assistantReviewerName: '',
+        assistantReviewedAt: '',
+        rejectionReason: '',
+        reviewedBy: '',
+        reviewerId: '',
+        reviewerName: '',
+        reviewedAt: '',
+        transactionId: '',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      await batch.commit();
+      return { ok: true, customTaskId, customTaskCode } as unknown as T;
+    } catch (err) {
+      wrapPermError(err, OperationType.CREATE, `customTasks/${customTaskId}`);
+    }
+  }
+
+  // 17. Assistant Admin or Main Admin: POST /api/admin/custom-tasks/:customTaskId/assist-review
+  const customAssistMatch = path.match(/^\/api\/admin\/custom-tasks\/([a-zA-Z0-9_\-]+)\/assist-review$/);
+  if (method === 'POST' && customAssistMatch) {
+    const customTaskId = customAssistMatch[1];
+    const assistantStatus = body.assistantStatus;
+    const assistantNote =
+      typeof body.assistantNote === 'string' ? body.assistantNote.trim().slice(0, 300) : '';
+
+    if (
+      assistantStatus !== 'reviewed' &&
+      assistantStatus !== 'recommended_approve' &&
+      assistantStatus !== 'recommended_reject'
+    ) {
+      throw new Error('Invalid inspection status.');
+    }
+    if (assistantStatus === 'recommended_reject' && assistantNote.length < 3) {
+      throw new Error('Please enter a recommendation note (at least 3 characters) when recommending rejection.');
+    }
+
+    try {
+      const [ctSnap, callerSnap, assistantSnap] = await Promise.all([
+        getDoc(doc(db, 'customTasks', customTaskId)),
+        getDoc(doc(db, 'users', uid)),
+        getDoc(doc(db, 'assistantAdmins', uid)),
+      ]);
+      if (!ctSnap.exists()) throw new Error('Custom task submission not found.');
+      const ctData = ctSnap.data();
+      if (ctData.status !== 'pending') {
+        throw new Error(`Custom task has already been ${ctData.status} by Main Admin.`);
+      }
+
+      const callerData = callerSnap.exists() ? callerSnap.data() : null;
+      const isAuthorized =
+        isInitialAdmin ||
+        (assistantSnap.exists() && callerData?.status === 'approved') ||
+        (callerData?.role === 'admin' && Boolean(currentUser.emailVerified));
+      if (!isAuthorized) {
+        throw new Error('Admin or Assistant Admin authorization required.');
+      }
+
+      const reviewerId = String(
+        callerData?.memberId || (assistantSnap.exists() ? assistantSnap.data().memberId : 'ADMIN')
+      );
+      const reviewerName = String(
+        callerData?.fullName || (assistantSnap.exists() ? assistantSnap.data().fullName : 'Admin')
+      );
+      const nowIso = new Date().toISOString();
+      const logId = randomDocId('log');
+
+      const batch = writeBatch(db);
+      batch.update(doc(db, 'customTasks', customTaskId), {
+        assistantStatus,
+        assistantNote,
+        assistantReviewedBy: uid,
+        assistantReviewerId: reviewerId,
+        assistantReviewerName: reviewerName,
+        assistantReviewedAt: nowIso,
+        updatedAt: serverTimestamp(),
+      });
+      batch.set(doc(db, 'adminAuditLogs', logId), {
+        logId,
+        adminUid: uid,
+        adminEmail: email || reviewerId,
+        action: 'CUSTOM_TASK_INSPECTED',
+        targetType: 'customTask',
+        targetId: customTaskId,
+        summary: `[${reviewerId}] Marked custom task ${ctData.customTaskCode} as ${assistantStatus}${assistantNote ? `: ${assistantNote}` : ''}`.slice(
+          0,
+          450
+        ),
+        createdAt: serverTimestamp(),
+      });
+      await batch.commit();
+      return { ok: true } as unknown as T;
+    } catch (err) {
+      wrapPermError(err, OperationType.UPDATE, `customTasks/${customTaskId}`);
+    }
+  }
+
+  // 18. Main Admin ONLY: POST /api/admin/custom-tasks/:customTaskId/decision
+  const customDecisionMatch = path.match(/^\/api\/admin\/custom-tasks\/([a-zA-Z0-9_\-]+)\/decision$/);
+  if (method === 'POST' && customDecisionMatch) {
+    const customTaskId = customDecisionMatch[1];
+    const decision = body.decision;
+    const rawApprovedAmount = body.approvedAmount;
+    const rawReason =
+      typeof body.rejectionReason === 'string' ? body.rejectionReason.trim().slice(0, 300) : '';
+
+    if (decision !== 'approved' && decision !== 'rejected') {
+      throw new Error('Decision must be approved or rejected.');
+    }
+    if (decision === 'rejected' && rawReason.length < 3) {
+      throw new Error('Please provide a rejection reason (at least 3 characters).');
+    }
+
+    try {
+      const [ctSnap, adminProfileSnap] = await Promise.all([
+        getDoc(doc(db, 'customTasks', customTaskId)),
+        getDoc(doc(db, 'users', uid)),
+      ]);
+      if (!ctSnap.exists()) throw new Error('Custom task submission not found.');
+      const ctData = ctSnap.data();
+      if (ctData.status !== 'pending') {
+        throw new Error(
+          `Custom task ${ctData.customTaskCode} has already been ${ctData.status}. Duplicate payment prevented.`
+        );
+      }
+
+      const adminProfile = adminProfileSnap.exists() ? adminProfileSnap.data() : null;
+      const reviewerId = String(adminProfile?.memberId || 'ADMIN');
+      const reviewerName = String(adminProfile?.fullName || 'Main Admin');
+
+      const memberUid = String(ctData.userId);
+      const memberCode = String(ctData.memberId || 'MTS-000000');
+      const taskName = String(ctData.taskName || 'Custom Task').slice(0, 400);
+      const customCode = String(ctData.customTaskCode || 'CTK-00000');
+      const requestedAmount = Number(ctData.requestedAmount);
+
+      const finalApprovedAmount =
+        decision === 'approved'
+          ? rawApprovedAmount !== undefined && rawApprovedAmount !== null && String(rawApprovedAmount) !== ''
+            ? Number(rawApprovedAmount)
+            : requestedAmount
+          : 0;
+
+      if (
+        decision === 'approved' &&
+        (!Number.isFinite(finalApprovedAmount) ||
+          !Number.isInteger(finalApprovedAmount) ||
+          finalApprovedAmount < 1 ||
+          finalApprovedAmount > 100000)
+      ) {
+        throw new Error('Approved amount must be a whole Taka integer between ৳1 and ৳100,000.');
+      }
+
+      const [memberSnap, walletSnap] = await Promise.all([
+        getDoc(doc(db, 'users', memberUid)),
+        getDoc(doc(db, 'wallets', memberUid)),
+      ]);
+
+      const nowIso = new Date().toISOString();
+      const txId = decision === 'approved' ? `tx_custom_${customTaskId}` : '';
+      const notifId = randomDocId('ntf');
+      const logId = randomDocId('log');
+      const batch = writeBatch(db);
+
+      batch.update(doc(db, 'customTasks', customTaskId), {
+        status: decision,
+        approvedAmount: finalApprovedAmount,
+        rejectionReason: decision === 'rejected' ? rawReason : '',
+        reviewedBy: uid,
+        reviewerId,
+        reviewerName,
+        reviewedAt: nowIso,
+        transactionId: txId,
+        updatedAt: serverTimestamp(),
+      });
+
+      if (decision === 'approved') {
+        if (walletSnap.exists()) {
+          const walletData = walletSnap.data();
+          batch.update(doc(db, 'wallets', memberUid), {
+            availableBalance: Number(walletData.availableBalance || 0) + finalApprovedAmount,
+            totalEarnings: Number(walletData.totalEarnings || 0) + finalApprovedAmount,
+            lastCreditedSubmissionId: customTaskId,
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          batch.set(doc(db, 'wallets', memberUid), {
+            userId: memberUid,
+            memberId: memberCode,
+            availableBalance: finalApprovedAmount,
+            totalEarnings: finalApprovedAmount,
+            totalWithdrawals: 0,
+            totalWithdrawalFees: 0,
+            reservedWithdrawals: 0,
+            lastWithdrawalId: '',
+            lastCreditedSubmissionId: customTaskId,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+
+        if (memberSnap.exists()) {
+          const memberData = memberSnap.data();
+          batch.update(doc(db, 'users', memberUid), {
+            completedTasksCount: Number(memberData.completedTasksCount || 0) + 1,
+            totalEarnings: Number(memberData.totalEarnings || 0) + finalApprovedAmount,
+            updatedAt: serverTimestamp(),
+          });
+        }
+
+        batch.set(doc(db, 'transactions', txId), {
+          transactionId: txId,
+          userId: memberUid,
+          memberId: memberCode,
+          type: 'custom_task_reward',
+          amount: finalApprovedAmount,
+          feeAmount: 0,
+          netAmount: finalApprovedAmount,
+          direction: 'credit',
+          description: `Custom task payment credited for ${customCode} (${taskName.slice(0, 140)})`.slice(0, 240),
+          referenceId: customTaskId,
+          taskName,
+          submissionId: customTaskId,
+          approvedAt: nowIso,
+          createdAt: serverTimestamp(),
+        });
+        batch.set(doc(db, 'notifications', notifId), {
+          notificationId: notifId,
+          userId: memberUid,
+          type: 'custom_task_approved',
+          title: 'Custom Task Approved & Paid',
+          message: `Your custom task "${taskName}" (${customCode}) was approved by Admin and ৳${finalApprovedAmount} has been credited to your wallet.`.slice(
+            0,
+            900
+          ),
+          referenceId: customTaskId,
+          isRead: false,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        batch.set(doc(db, 'adminAuditLogs', logId), {
+          logId,
+          adminUid: uid,
+          adminEmail: email,
+          action: 'CUSTOM_TASK_APPROVED',
+          targetType: 'customTask',
+          targetId: customTaskId,
+          summary: `Approved custom task ${customCode} ("${taskName}") for ${memberCode} and credited ৳${finalApprovedAmount}`.slice(
+            0,
+            450
+          ),
+          createdAt: serverTimestamp(),
+        });
+      } else {
+        batch.set(doc(db, 'notifications', notifId), {
+          notificationId: notifId,
+          userId: memberUid,
+          type: 'custom_task_rejected',
+          title: 'Custom Task Not Approved',
+          message: `Your custom task "${taskName}" (${customCode}) was rejected. Reason: ${rawReason}`.slice(
+            0,
+            900
+          ),
+          referenceId: customTaskId,
+          isRead: false,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        batch.set(doc(db, 'adminAuditLogs', logId), {
+          logId,
+          adminUid: uid,
+          adminEmail: email,
+          action: 'CUSTOM_TASK_REJECTED',
+          targetType: 'customTask',
+          targetId: customTaskId,
+          summary: `Rejected custom task ${customCode} ("${taskName}") for ${memberCode}: ${rawReason}`.slice(
+            0,
+            450
+          ),
+          createdAt: serverTimestamp(),
+        });
+      }
+
+      await batch.commit();
+      return { ok: true } as unknown as T;
+    } catch (err) {
+      wrapPermError(err, OperationType.UPDATE, `customTasks/${customTaskId}`);
+    }
+  }
+
+  // 19. Member: POST /api/notifications/:notificationId/read
+  const notifReadMatch = path.match(/^\/api\/notifications\/([a-zA-Z0-9_\-]+)\/read$/);
+  if (method === 'POST' && notifReadMatch) {
+    const notificationId = notifReadMatch[1];
+    try {
+      const notifRef = doc(db, 'notifications', notificationId);
+      const notifSnap = await getDoc(notifRef);
+      if (!notifSnap.exists() || notifSnap.data().userId !== uid) {
+        throw new Error('Notification not found.');
+      }
+      if (notifSnap.data().isRead === true) {
+        return { ok: true } as unknown as T;
+      }
+      const batch = writeBatch(db);
+      batch.update(notifRef, {
+        isRead: true,
+        updatedAt: serverTimestamp(),
+      });
+      await batch.commit();
+      return { ok: true } as unknown as T;
+    } catch (err) {
+      wrapPermError(err, OperationType.UPDATE, `notifications/${notificationId}`);
     }
   }
 

@@ -44,6 +44,11 @@ service cloud.firestore {
       );
     }
 
+    function isAssistantAdmin() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/assistantAdmins/$(request.auth.uid));
+    }
+
     function isApprovedMember() {
       return isSignedIn() &&
         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
@@ -58,6 +63,17 @@ service cloud.firestore {
         data.keys().hasOnly(['uid', 'email', 'createdAt']) &&
         isValidId(data.uid) &&
         data.email is string && data.email.size() >= 3 && data.email.size() <= 150 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidAssistantAdminRecord(data) {
+      return data.keys().hasAll(['uid', 'memberId', 'fullName', 'email', 'createdBy', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'memberId', 'fullName', 'email', 'createdBy', 'createdAt']) &&
+        isValidId(data.uid) &&
+        data.memberId is string && data.memberId.size() >= 6 && data.memberId.size() <= 20 &&
+        data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 300 &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 150 &&
+        isValidId(data.createdBy) &&
         data.createdAt is timestamp;
     }
 
@@ -84,7 +100,7 @@ service cloud.firestore {
           data.photoAssetId.size() <= 128 &&
           (data.photoAssetId == '' || isValidId(data.photoAssetId))
         )) &&
-        data.role is string && data.role.size() <= 10 && data.role in ['member', 'admin'] &&
+        data.role is string && data.role.size() <= 20 && data.role in ['member', 'assistant_admin', 'admin'] &&
         data.status is string && data.status.size() <= 15 && data.status in ['pending', 'approved', 'rejected'] &&
         (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 1000)) &&
         data.completedTasksCount is number && data.completedTasksCount >= 0 &&
@@ -137,7 +153,8 @@ service cloud.firestore {
         data.keys().hasOnly([
           'submissionId', 'taskId', 'taskCode', 'taskTitle', 'rewardAmount',
           'userId', 'memberId', 'memberName', 'screenshotAssetId', 'proofLink', 'submissionNote',
-          'status', 'rejectionReason', 'reviewedBy', 'reviewedAt', 'createdAt', 'updatedAt'
+          'status', 'rejectionReason', 'reviewedBy', 'reviewerId', 'reviewerName',
+          'reviewerRole', 'reviewAction', 'reviewedAt', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.submissionId) &&
         isValidId(data.taskId) &&
@@ -157,7 +174,75 @@ service cloud.firestore {
         data.status is string && data.status.size() <= 15 && data.status in ['pending', 'approved', 'rejected'] &&
         data.rejectionReason is string && data.rejectionReason.size() <= 1000 &&
         data.reviewedBy is string && data.reviewedBy.size() <= 128 &&
+        (!('reviewerId' in data) || (data.reviewerId is string && data.reviewerId.size() <= 30)) &&
+        (!('reviewerName' in data) || (data.reviewerName is string && data.reviewerName.size() <= 300)) &&
+        (!('reviewerRole' in data) || (data.reviewerRole is string && data.reviewerRole.size() <= 20 && data.reviewerRole in ['', 'admin', 'assistant_admin'])) &&
+        (!('reviewAction' in data) || (data.reviewAction is string && data.reviewAction.size() <= 15 && data.reviewAction in ['', 'approved', 'rejected'])) &&
         data.reviewedAt is string && data.reviewedAt.size() <= 40 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCustomTaskSubmission(data) {
+      return data.keys().hasAll([
+          'customTaskId', 'customTaskCode', 'userId', 'memberId', 'memberName',
+          'taskName', 'taskDetails', 'requestedAmount', 'approvedAmount', 'screenshotAssetId',
+          'status', 'assistantStatus', 'assistantNote', 'assistantReviewedBy',
+          'assistantReviewerId', 'assistantReviewerName', 'assistantReviewedAt',
+          'rejectionReason', 'reviewedBy', 'reviewerId', 'reviewerName', 'reviewedAt',
+          'transactionId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'customTaskId', 'customTaskCode', 'userId', 'memberId', 'memberName',
+          'taskName', 'taskDetails', 'requestedAmount', 'approvedAmount', 'screenshotAssetId',
+          'status', 'assistantStatus', 'assistantNote', 'assistantReviewedBy',
+          'assistantReviewerId', 'assistantReviewerName', 'assistantReviewedAt',
+          'rejectionReason', 'reviewedBy', 'reviewerId', 'reviewerName', 'reviewedAt',
+          'transactionId', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.customTaskId) &&
+        data.customTaskCode is string && data.customTaskCode.size() >= 6 && data.customTaskCode.size() <= 20 && data.customTaskCode.matches('^CTK-[0-9]{5}$') &&
+        isValidId(data.userId) &&
+        data.memberId is string && data.memberId.size() >= 6 && data.memberId.size() <= 20 &&
+        data.memberName is string && data.memberName.size() >= 1 && data.memberName.size() <= 300 &&
+        data.taskName is string && data.taskName.size() >= 2 && data.taskName.size() <= 400 &&
+        data.taskDetails is string && data.taskDetails.size() >= 5 && data.taskDetails.size() <= 5000 &&
+        data.requestedAmount is number && data.requestedAmount >= 1 && data.requestedAmount <= 100000 &&
+        data.approvedAmount is number && data.approvedAmount >= 0 && data.approvedAmount <= 100000 &&
+        data.screenshotAssetId is string && data.screenshotAssetId.size() <= 128 &&
+        (data.screenshotAssetId == '' || isValidId(data.screenshotAssetId)) &&
+        data.status is string && data.status.size() <= 15 && data.status in ['pending', 'approved', 'rejected'] &&
+        data.assistantStatus is string && data.assistantStatus.size() <= 25 && data.assistantStatus in ['unreviewed', 'reviewed', 'recommended_approve', 'recommended_reject'] &&
+        data.assistantNote is string && data.assistantNote.size() <= 1000 &&
+        data.assistantReviewedBy is string && data.assistantReviewedBy.size() <= 128 &&
+        data.assistantReviewerId is string && data.assistantReviewerId.size() <= 30 &&
+        data.assistantReviewerName is string && data.assistantReviewerName.size() <= 300 &&
+        data.assistantReviewedAt is string && data.assistantReviewedAt.size() <= 40 &&
+        data.rejectionReason is string && data.rejectionReason.size() <= 1000 &&
+        data.reviewedBy is string && data.reviewedBy.size() <= 128 &&
+        data.reviewerId is string && data.reviewerId.size() <= 30 &&
+        data.reviewerName is string && data.reviewerName.size() <= 300 &&
+        data.reviewedAt is string && data.reviewedAt.size() <= 40 &&
+        data.transactionId is string && data.transactionId.size() <= 128 &&
+        (data.transactionId == '' || isValidId(data.transactionId)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidMemberNotification(data) {
+      return data.keys().hasAll([
+          'notificationId', 'userId', 'type', 'title', 'message', 'referenceId', 'isRead', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'notificationId', 'userId', 'type', 'title', 'message', 'referenceId', 'isRead', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.notificationId) &&
+        isValidId(data.userId) &&
+        data.type is string && data.type.size() <= 30 && data.type in ['custom_task_approved', 'custom_task_rejected', 'task_approved', 'task_rejected'] &&
+        data.title is string && data.title.size() >= 3 && data.title.size() <= 200 &&
+        data.message is string && data.message.size() >= 3 && data.message.size() <= 1000 &&
+        isValidId(data.referenceId) &&
+        data.isRead is bool &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -170,7 +255,7 @@ service cloud.firestore {
         data.keys().hasOnly([
           'userId', 'memberId', 'availableBalance', 'totalEarnings',
           'totalWithdrawals', 'totalWithdrawalFees', 'reservedWithdrawals',
-          'lastWithdrawalId', 'createdAt', 'updatedAt'
+          'lastWithdrawalId', 'lastCreditedSubmissionId', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.userId) &&
         data.memberId is string && data.memberId.size() >= 6 && data.memberId.size() <= 20 &&
@@ -184,6 +269,11 @@ service cloud.firestore {
           data.lastWithdrawalId.size() <= 128 &&
           (data.lastWithdrawalId == '' || isValidId(data.lastWithdrawalId))
         )) &&
+        (!('lastCreditedSubmissionId' in data) || (
+          data.lastCreditedSubmissionId is string &&
+          data.lastCreditedSubmissionId.size() <= 128 &&
+          (data.lastCreditedSubmissionId == '' || isValidId(data.lastCreditedSubmissionId))
+        )) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -195,18 +285,26 @@ service cloud.firestore {
         ]) &&
         data.keys().hasOnly([
           'transactionId', 'userId', 'memberId', 'type', 'amount',
-          'feeAmount', 'netAmount', 'direction', 'description', 'referenceId', 'createdAt'
+          'feeAmount', 'netAmount', 'direction', 'description', 'referenceId',
+          'taskName', 'submissionId', 'approvedAt', 'createdAt'
         ]) &&
         isValidId(data.transactionId) &&
         isValidId(data.userId) &&
         data.memberId is string && data.memberId.size() >= 6 && data.memberId.size() <= 20 &&
-        data.type is string && data.type.size() <= 30 && data.type in ['task_reward', 'withdrawal_request', 'withdrawal_paid', 'withdrawal_refund'] &&
+        data.type is string && data.type.size() <= 30 && data.type in ['task_reward', 'custom_task_reward', 'withdrawal_request', 'withdrawal_paid', 'withdrawal_refund'] &&
         data.amount is number && data.amount > 0 &&
         data.feeAmount is number && data.feeAmount >= 0 &&
         data.netAmount is number && data.netAmount > 0 &&
         data.direction is string && data.direction.size() <= 15 && data.direction in ['credit', 'debit', 'settlement'] &&
         data.description is string && data.description.size() >= 3 && data.description.size() <= 1000 &&
         isValidId(data.referenceId) &&
+        (!('taskName' in data) || (data.taskName is string && data.taskName.size() <= 400)) &&
+        (!('submissionId' in data) || (
+          data.submissionId is string &&
+          data.submissionId.size() <= 128 &&
+          (data.submissionId == '' || isValidId(data.submissionId))
+        )) &&
+        (!('approvedAt' in data) || (data.approvedAt is string && data.approvedAt.size() <= 40)) &&
         data.createdAt is timestamp;
     }
 
@@ -286,7 +384,7 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // Collection Match Blocks (All 10 Collections)
+    // Collection Match Blocks (All 13 Collections)
     // =========================================================================
 
     match /admins/{adminId} {
@@ -300,8 +398,24 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    match /assistantAdmins/{assistantId} {
+      allow get: if isSignedIn() && isValidId(assistantId) && (request.auth.uid == assistantId || isAdmin());
+      allow list: if isBootstrappedAdmin();
+      allow create: if isVerifiedAdminAuth() && isValidId(assistantId) && isValidAssistantAdminRecord(incoming()) &&
+        incoming().uid == assistantId &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        isAdmin();
+      allow update: if false;
+      allow delete: if isVerifiedAdminAuth() && isValidId(assistantId) && isAdmin();
+    }
+
     match /users/{userId} {
-      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow get: if isSignedIn() && isValidId(userId) && (
+        request.auth.uid == userId ||
+        isAdmin() ||
+        isAssistantAdmin()
+      );
       allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.uid == request.auth.uid);
       allow create: if isSignedIn() && isValidId(userId) && isValidUserProfile(incoming()) &&
         incoming().uid == userId &&
@@ -322,6 +436,14 @@ service cloud.firestore {
             incoming().completedTasksCount == 0 &&
             incoming().pendingSubmissionsCount == 0 &&
             incoming().totalEarnings == 0
+          ) || (
+            isAdmin() &&
+            incoming().role == 'assistant_admin' &&
+            incoming().status == 'approved' &&
+            incoming().completedTasksCount == 0 &&
+            incoming().pendingSubmissionsCount == 0 &&
+            incoming().totalEarnings == 0 &&
+            existsAfter(/databases/$(database)/documents/assistantAdmins/$(userId))
           )
         );
       allow update: if isSignedIn() && isValidUserProfile(incoming()) && isValidId(userId) &&
@@ -329,15 +451,42 @@ service cloud.firestore {
         incoming().memberId == existing().memberId &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
-          // Action 1: Admin manages member status, rejection reason, or summary counters
+          // Action 1: Main Admin manages member/assistant status, role, rejection reason, or summary counters
           (
             isAdmin() &&
-            incoming().role == existing().role &&
+            (
+              incoming().role == existing().role ||
+              (existing().role != 'admin' && incoming().role in ['member', 'assistant_admin'])
+            ) &&
             incoming().diff(existing()).affectedKeys().hasOnly([
-              'status', 'rejectionReason', 'completedTasksCount',
+              'role', 'status', 'rejectionReason', 'completedTasksCount',
               'pendingSubmissionsCount', 'totalEarnings', 'photoAssetId',
               'lastPasswordChangedAt', 'updatedAt'
             ])
+          ) ||
+          // Action 1B: Assistant Admin updates member task counters ONLY during atomic official submission review
+          (
+            isAssistantAdmin() &&
+            existing().role == 'member' &&
+            incoming().role == 'member' &&
+            incoming().status == existing().status &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'completedTasksCount', 'pendingSubmissionsCount', 'totalEarnings', 'updatedAt'
+            ]) && (
+              (
+                incoming().totalEarnings == existing().totalEarnings &&
+                incoming().completedTasksCount == existing().completedTasksCount &&
+                incoming().pendingSubmissionsCount == (existing().pendingSubmissionsCount > 0 ? existing().pendingSubmissionsCount - 1 : 0)
+              ) || (
+                incoming().completedTasksCount == existing().completedTasksCount + 1 &&
+                incoming().pendingSubmissionsCount == (existing().pendingSubmissionsCount > 0 ? existing().pendingSubmissionsCount - 1 : 0) &&
+                ('lastCreditedSubmissionId' in getAfter(/databases/$(database)/documents/wallets/$(userId)).data) &&
+                isValidId(getAfter(/databases/$(database)/documents/wallets/$(userId)).data.lastCreditedSubmissionId) &&
+                get(/databases/$(database)/documents/submissions/$(getAfter(/databases/$(database)/documents/wallets/$(userId)).data.lastCreditedSubmissionId)).data.status == 'pending' &&
+                getAfter(/databases/$(database)/documents/submissions/$(getAfter(/databases/$(database)/documents/wallets/$(userId)).data.lastCreditedSubmissionId)).data.status == 'approved' &&
+                incoming().totalEarnings == existing().totalEarnings + get(/databases/$(database)/documents/submissions/$(getAfter(/databases/$(database)/documents/wallets/$(userId)).data.lastCreditedSubmissionId)).data.rewardAmount
+              )
+            )
           ) ||
           // Action 2: Bootstrapped owner elevates own initial profile to admin
           (
@@ -375,7 +524,11 @@ service cloud.firestore {
     }
 
     match /mediaAssets/{assetId} {
-      allow get: if isSignedIn() && isValidId(assetId) && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow get: if isSignedIn() && isValidId(assetId) && (
+        resource.data.ownerId == request.auth.uid ||
+        isAdmin() ||
+        isAssistantAdmin()
+      );
       allow list: if false;
       allow create: if isSignedIn() && isValidId(assetId) && isValidMediaAsset(incoming()) &&
         incoming().assetId == assetId &&
@@ -391,9 +544,10 @@ service cloud.firestore {
     match /tasks/{taskId} {
       allow get: if isSignedIn() && isValidId(taskId) && (
         (resource.data.isActive == true && isApprovedMember()) ||
-        isAdmin()
+        isAdmin() ||
+        isAssistantAdmin()
       );
-      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.isActive == true);
+      allow list: if isBootstrappedAdmin() || isAssistantAdmin() || (isSignedIn() && resource.data.isActive == true);
       allow create: if isVerifiedAdminAuth() && isValidId(taskId) && isValidTaskItem(incoming()) &&
         incoming().taskId == taskId &&
         incoming().createdBy == request.auth.uid &&
@@ -414,8 +568,12 @@ service cloud.firestore {
     }
 
     match /submissions/{submissionId} {
-      allow get: if isSignedIn() && isValidId(submissionId) && (resource.data.userId == request.auth.uid || isAdmin());
-      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow get: if isSignedIn() && isValidId(submissionId) && (
+        resource.data.userId == request.auth.uid ||
+        isAdmin() ||
+        isAssistantAdmin()
+      );
+      allow list: if isBootstrappedAdmin() || isAssistantAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
       allow create: if isSignedIn() && isValidId(submissionId) && isValidTaskSubmission(incoming()) &&
         incoming().submissionId == submissionId &&
         incoming().userId == request.auth.uid &&
@@ -431,7 +589,7 @@ service cloud.firestore {
         get(/databases/$(database)/documents/tasks/$(incoming().taskId)).data.rewardAmount == incoming().rewardAmount &&
         exists(/databases/$(database)/documents/mediaAssets/$(incoming().screenshotAssetId)) &&
         get(/databases/$(database)/documents/mediaAssets/$(incoming().screenshotAssetId)).data.ownerId == request.auth.uid;
-      allow update: if isVerifiedAdminAuth() && isValidTaskSubmission(incoming()) && isValidId(submissionId) &&
+      allow update: if isSignedIn() && isValidTaskSubmission(incoming()) && isValidId(submissionId) &&
         incoming().submissionId == existing().submissionId &&
         incoming().taskId == existing().taskId &&
         incoming().userId == existing().userId &&
@@ -439,23 +597,157 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
         existing().status == 'pending' &&
-        (incoming().status == 'approved' || incoming().status == 'rejected') &&
+        (
+          (incoming().status == 'approved' && incoming().rejectionReason == '') ||
+          (incoming().status == 'rejected' && incoming().rejectionReason.size() >= 3)
+        ) &&
         incoming().reviewedBy == request.auth.uid &&
         incoming().diff(existing()).affectedKeys().hasOnly([
-          'status', 'rejectionReason', 'reviewedBy', 'reviewedAt', 'updatedAt'
+          'status', 'rejectionReason', 'reviewedBy', 'reviewerId', 'reviewerName',
+          'reviewerRole', 'reviewAction', 'reviewedAt', 'updatedAt'
         ]) &&
-        isAdmin();
+        (isAdmin() || isAssistantAdmin());
+      allow delete: if false;
+    }
+
+    match /customTasks/{customTaskId} {
+      allow get: if isSignedIn() && isValidId(customTaskId) && (
+        resource.data.userId == request.auth.uid ||
+        isAdmin() ||
+        isAssistantAdmin()
+      );
+      allow list: if isBootstrappedAdmin() || isAssistantAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && isValidId(customTaskId) && isValidCustomTaskSubmission(incoming()) &&
+        incoming().customTaskId == customTaskId &&
+        incoming().userId == request.auth.uid &&
+        incoming().status == 'pending' &&
+        incoming().approvedAmount == 0 &&
+        incoming().assistantStatus == 'unreviewed' &&
+        incoming().assistantNote == '' &&
+        incoming().assistantReviewedBy == '' &&
+        incoming().assistantReviewerId == '' &&
+        incoming().assistantReviewerName == '' &&
+        incoming().assistantReviewedAt == '' &&
+        incoming().rejectionReason == '' &&
+        incoming().reviewedBy == '' &&
+        incoming().reviewerId == '' &&
+        incoming().reviewerName == '' &&
+        incoming().reviewedAt == '' &&
+        incoming().transactionId == '' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isApprovedMember() &&
+        (
+          incoming().screenshotAssetId == '' || (
+            exists(/databases/$(database)/documents/mediaAssets/$(incoming().screenshotAssetId)) &&
+            get(/databases/$(database)/documents/mediaAssets/$(incoming().screenshotAssetId)).data.ownerId == request.auth.uid
+          )
+        );
+      allow update: if isSignedIn() && isValidCustomTaskSubmission(incoming()) && isValidId(customTaskId) &&
+        incoming().customTaskId == existing().customTaskId &&
+        incoming().customTaskCode == existing().customTaskCode &&
+        incoming().userId == existing().userId &&
+        incoming().memberId == existing().memberId &&
+        incoming().memberName == existing().memberName &&
+        incoming().taskName == existing().taskName &&
+        incoming().taskDetails == existing().taskDetails &&
+        incoming().requestedAmount == existing().requestedAmount &&
+        incoming().screenshotAssetId == existing().screenshotAssetId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          // Action 1: Assistant Admin (or Main Admin) inspects custom task & records recommendation without crediting wallet
+          (
+            (isAssistantAdmin() || isAdmin()) &&
+            existing().status == 'pending' &&
+            incoming().status == 'pending' &&
+            incoming().approvedAmount == 0 &&
+            incoming().assistantStatus in ['reviewed', 'recommended_approve', 'recommended_reject'] &&
+            (incoming().assistantStatus != 'recommended_reject' || incoming().assistantNote.size() >= 3) &&
+            incoming().assistantReviewedBy == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'assistantStatus', 'assistantNote', 'assistantReviewedBy',
+              'assistantReviewerId', 'assistantReviewerName', 'assistantReviewedAt', 'updatedAt'
+            ])
+          ) ||
+          // Action 2: ONLY Main Admin finally approves or rejects custom task payment
+          (
+            isAdmin() &&
+            existing().status == 'pending' &&
+            incoming().reviewedBy == request.auth.uid &&
+            (
+              (
+                incoming().status == 'approved' &&
+                incoming().approvedAmount >= 1 &&
+                incoming().rejectionReason == '' &&
+                incoming().transactionId == 'tx_custom_' + customTaskId
+              ) || (
+                incoming().status == 'rejected' &&
+                incoming().approvedAmount == 0 &&
+                incoming().rejectionReason.size() >= 3 &&
+                incoming().transactionId == ''
+              )
+            ) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'approvedAmount', 'rejectionReason', 'reviewedBy',
+              'reviewerId', 'reviewerName', 'reviewedAt', 'transactionId', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if false;
+    }
+
+    match /notifications/{notificationId} {
+      allow get: if isSignedIn() && isValidId(notificationId) && (
+        resource.data.userId == request.auth.uid ||
+        isAdmin()
+      );
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && isValidId(notificationId) && isValidMemberNotification(incoming()) &&
+        incoming().notificationId == notificationId &&
+        incoming().isRead == false &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (isAdmin() || isAssistantAdmin());
+      allow update: if isSignedIn() && isValidMemberNotification(incoming()) && isValidId(notificationId) &&
+        request.auth.uid == existing().userId &&
+        incoming().notificationId == existing().notificationId &&
+        incoming().userId == existing().userId &&
+        incoming().type == existing().type &&
+        incoming().title == existing().title &&
+        incoming().message == existing().message &&
+        incoming().referenceId == existing().referenceId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        existing().isRead == false &&
+        incoming().isRead == true &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['isRead', 'updatedAt']);
       allow delete: if false;
     }
 
     match /wallets/{userId} {
-      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow get: if isSignedIn() && isValidId(userId) && (
+        request.auth.uid == userId ||
+        isAdmin() ||
+        isAssistantAdmin()
+      );
       allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
       allow create: if isSignedIn() && isValidId(userId) && isValidMemberWallet(incoming()) &&
         incoming().userId == userId &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time && (
           isAdmin() ||
+          (
+            isAssistantAdmin() &&
+            ('lastCreditedSubmissionId' in incoming()) &&
+            isValidId(incoming().lastCreditedSubmissionId) &&
+            incoming().totalWithdrawals == 0 &&
+            exists(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)) &&
+            get(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.userId == userId &&
+            get(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.status == 'pending' &&
+            getAfter(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.status == 'approved' &&
+            incoming().availableBalance == get(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.rewardAmount &&
+            incoming().totalEarnings == get(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.rewardAmount
+          ) ||
           (
             request.auth.uid == userId &&
             incoming().availableBalance == 0 &&
@@ -471,15 +763,32 @@ service cloud.firestore {
         incoming().memberId == existing().memberId &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
-          // Action 1: Admin settlement (task reward credit, withdrawal paid, withdrawal refund)
+          // Action 1: Main Admin settlement (official reward, custom task payment, withdrawal paid/refund)
           (
             isAdmin() &&
             incoming().diff(existing()).affectedKeys().hasOnly([
               'availableBalance', 'totalEarnings', 'totalWithdrawals',
-              'totalWithdrawalFees', 'reservedWithdrawals', 'lastWithdrawalId', 'updatedAt'
+              'totalWithdrawalFees', 'reservedWithdrawals', 'lastWithdrawalId',
+              'lastCreditedSubmissionId', 'updatedAt'
             ])
           ) ||
-          // Action 2: Atomic member withdrawal reservation verified via getAfter
+          // Action 2: Assistant Admin atomic single-credit on official task approval ONLY (zero manual balance changes)
+          (
+            isAssistantAdmin() &&
+            ('lastCreditedSubmissionId' in incoming()) &&
+            isValidId(incoming().lastCreditedSubmissionId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'availableBalance', 'totalEarnings', 'lastCreditedSubmissionId', 'updatedAt'
+            ]) &&
+            exists(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)) &&
+            get(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.userId == userId &&
+            get(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.status == 'pending' &&
+            getAfter(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.status == 'approved' &&
+            getAfter(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.reviewedBy == request.auth.uid &&
+            incoming().availableBalance == existing().availableBalance + get(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.rewardAmount &&
+            incoming().totalEarnings == existing().totalEarnings + get(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.rewardAmount
+          ) ||
+          // Action 3: Atomic member withdrawal reservation verified via getAfter
           (
             request.auth.uid == userId &&
             isApprovedMember() &&
@@ -507,6 +816,19 @@ service cloud.firestore {
         incoming().transactionId == transactionId &&
         incoming().createdAt == request.time && (
           isAdmin() ||
+          (
+            isAssistantAdmin() &&
+            incoming().type == 'task_reward' &&
+            incoming().direction == 'credit' &&
+            incoming().feeAmount == 0 &&
+            incoming().netAmount == incoming().amount &&
+            transactionId == 'tx_reward_' + incoming().referenceId &&
+            exists(/databases/$(database)/documents/submissions/$(incoming().referenceId)) &&
+            get(/databases/$(database)/documents/submissions/$(incoming().referenceId)).data.status == 'pending' &&
+            getAfter(/databases/$(database)/documents/submissions/$(incoming().referenceId)).data.status == 'approved' &&
+            incoming().userId == get(/databases/$(database)/documents/submissions/$(incoming().referenceId)).data.userId &&
+            incoming().amount == get(/databases/$(database)/documents/submissions/$(incoming().referenceId)).data.rewardAmount
+          ) ||
           (
             incoming().userId == request.auth.uid &&
             incoming().type == 'withdrawal_request' &&
@@ -578,7 +900,7 @@ service cloud.firestore {
         incoming().reason == existing().reason &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
-          // Action 1: Admin approves or rejects a pending request
+          // Action 1: Main Admin approves or rejects a pending request
           (
             isAdmin() &&
             existing().status == 'pending' &&
@@ -601,12 +923,12 @@ service cloud.firestore {
 
     match /adminAuditLogs/{logId} {
       allow get: if isVerifiedAdminAuth() && isValidId(logId) && isAdmin();
-      allow list: if isBootstrappedAdmin() || (isBootstrappedAdmin() && resource.data.adminUid == request.auth.uid);
-      allow create: if isVerifiedAdminAuth() && isValidId(logId) && isValidAdminAuditLog(incoming()) &&
+      allow list: if isBootstrappedAdmin();
+      allow create: if isSignedIn() && isValidId(logId) && isValidAdminAuditLog(incoming()) &&
         incoming().logId == logId &&
         incoming().adminUid == request.auth.uid &&
         incoming().createdAt == request.time &&
-        isAdmin();
+        (isAdmin() || isAssistantAdmin());
       allow update: if false;
       allow delete: if false;
     }

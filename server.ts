@@ -12,6 +12,7 @@ import {
   buildDeleteWrite,
   buildReplaceUpdateWrite,
   commitSingleOrBatchWrites,
+  firebaseConfig,
   getDocRest,
   preserveTimestamp,
   queryByUserFieldRest,
@@ -62,17 +63,66 @@ async function requireVerifiedAuth(req: AuthedRequest, _res: Response, next: Nex
   }
 }
 
-async function assertCallerIsAdmin(authUser: VerifiedAuthUser): Promise<void> {
+async function assertCallerIsAdmin(authUser: VerifiedAuthUser): Promise<{
+  role: 'admin';
+  reviewerId: string;
+  reviewerName: string;
+}> {
   if (!authUser.emailVerified) {
     throw new HttpError(403, 'Administrator accounts require a verified email.');
   }
+  const profileDoc = await getDocRest('users', authUser.uid, authUser.idToken);
+  const reviewerId = String(profileDoc?.data?.memberId || 'ADMIN');
+  const reviewerName = String(profileDoc?.data?.fullName || 'Main Admin');
+
   if (isConfiguredAdminEmail(authUser.email)) {
-    return;
+    return { role: 'admin', reviewerId, reviewerName };
   }
   const adminDoc = await getDocRest('admins', authUser.uid, authUser.idToken);
   if (!adminDoc) {
-    throw new HttpError(403, 'Administrator authorization required.');
+    throw new HttpError(403, 'Main Administrator authorization required.');
   }
+  return { role: 'admin', reviewerId, reviewerName };
+}
+
+async function assertCallerIsAdminOrAssistant(authUser: VerifiedAuthUser): Promise<{
+  role: 'admin' | 'assistant_admin';
+  reviewerId: string;
+  reviewerName: string;
+}> {
+  if (authUser.emailVerified && isConfiguredAdminEmail(authUser.email)) {
+    const profileDoc = await getDocRest('users', authUser.uid, authUser.idToken);
+    return {
+      role: 'admin',
+      reviewerId: String(profileDoc?.data?.memberId || 'ADMIN'),
+      reviewerName: String(profileDoc?.data?.fullName || 'Main Admin'),
+    };
+  }
+
+  if (authUser.emailVerified) {
+    const adminDoc = await getDocRest('admins', authUser.uid, authUser.idToken);
+    if (adminDoc) {
+      const profileDoc = await getDocRest('users', authUser.uid, authUser.idToken);
+      return {
+        role: 'admin',
+        reviewerId: String(profileDoc?.data?.memberId || 'ADMIN'),
+        reviewerName: String(profileDoc?.data?.fullName || 'Main Admin'),
+      };
+    }
+  }
+
+  const [assistantDoc, profileDoc] = await Promise.all([
+    getDocRest('assistantAdmins', authUser.uid, authUser.idToken),
+    getDocRest('users', authUser.uid, authUser.idToken),
+  ]);
+  if (!assistantDoc || !profileDoc || profileDoc.data.status !== 'approved') {
+    throw new HttpError(403, 'Admin or Assistant Admin authorization required.');
+  }
+  return {
+    role: 'assistant_admin',
+    reviewerId: String(profileDoc.data.memberId || assistantDoc.data.memberId || 'ASSISTANT'),
+    reviewerName: String(profileDoc.data.fullName || assistantDoc.data.fullName || 'Assistant Admin'),
+  };
 }
 
 async function startServer() {
@@ -961,23 +1011,19 @@ async function startServer() {
     }
   );
 
-  // 7D. Review Proof Submission & Atomically Credit Task Reward Once
+  // 7D. Review Official Proof Submission & Atomically Credit Task Reward Exactly Once (Main Admin or Assistant Admin)
   app.post(
     '/api/admin/submissions/:submissionId/review',
     requireVerifiedAuth,
     async (req: AuthedRequest, res: Response, next: NextFunction) => {
       try {
-        const admin = req.authUser!;
-        await assertCallerIsAdmin(admin);
+        const reviewerAuth = req.authUser!;
+        const reviewerInfo = await assertCallerIsAdminOrAssistant(reviewerAuth);
 
         const submissionId = String(req.params.submissionId || '');
         const decision = req.body?.decision;
         const rawReason =
           typeof req.body?.rejectionReason === 'string' ? req.body.rejectionReason.trim().slice(0, 300) : '';
-        const rejectionReason =
-          decision === 'rejected'
-            ? rawReason || 'Submitted proof did not match task instructions'
-            : '';
 
         if (!VALID_ID_REGEX.test(submissionId)) {
           throw new HttpError(400, 'Invalid submission ID.');
@@ -985,10 +1031,14 @@ async function startServer() {
         if (decision !== 'approved' && decision !== 'rejected') {
           throw new HttpError(400, 'Decision must be approved or rejected.');
         }
+        if (decision === 'rejected' && rawReason.length < 3) {
+          throw new HttpError(400, 'Please enter a rejection reason (at least 3 characters) when rejecting a task.');
+        }
+        const rejectionReason = decision === 'rejected' ? rawReason : '';
 
         const nowIso = new Date().toISOString();
 
-        await runAtomicTransaction(admin.idToken, async (tx) => {
+        await runAtomicTransaction(reviewerAuth.idToken, async (tx) => {
           const submission = await tx.get('submissions', submissionId);
           if (!submission) {
             throw new HttpError(404, 'Submission not found.');
@@ -1002,12 +1052,15 @@ async function startServer() {
 
           const memberUid = String(submission.data.userId);
           const memberCode = String(submission.data.memberId || 'MTS-000000');
+          const taskTitle = String(submission.data.taskTitle || 'Official Task').slice(0, 400);
+          const taskCode = String(submission.data.taskCode || 'TSK-00000');
           const rewardAmount = Number(submission.data.rewardAmount);
 
           const memberProfile = await tx.get('users', memberUid);
           const memberWallet = await tx.get('wallets', memberUid);
 
           const logId = generateDocId('log');
+          const notifId = generateDocId('ntf');
           const writes = [
             buildReplaceUpdateWrite(
               'submissions',
@@ -1016,7 +1069,11 @@ async function startServer() {
                 ...submission.data,
                 status: decision,
                 rejectionReason,
-                reviewedBy: admin.uid,
+                reviewedBy: reviewerAuth.uid,
+                reviewerId: reviewerInfo.reviewerId,
+                reviewerName: reviewerInfo.reviewerName,
+                reviewerRole: reviewerInfo.role,
+                reviewAction: decision,
                 reviewedAt: nowIso,
                 createdAt: preserveTimestamp(submission.raw, 'createdAt'),
               },
@@ -1025,7 +1082,8 @@ async function startServer() {
           ];
 
           if (decision === 'approved') {
-            const txLedgerId = generateDocId('tx');
+            // Deterministic ledger ID prevents duplicate wallet credits for the same submission
+            const txLedgerId = `tx_reward_${submissionId}`;
 
             if (memberWallet) {
               const prevAvail = Number(memberWallet.data.availableBalance || 0);
@@ -1038,6 +1096,7 @@ async function startServer() {
                     ...memberWallet.data,
                     availableBalance: prevAvail + rewardAmount,
                     totalEarnings: prevWalletEarnings + rewardAmount,
+                    lastCreditedSubmissionId: submissionId,
                     createdAt: preserveTimestamp(memberWallet.raw, 'createdAt'),
                   },
                   memberWallet.updateTime
@@ -1057,6 +1116,7 @@ async function startServer() {
                     totalWithdrawalFees: 0,
                     reservedWithdrawals: 0,
                     lastWithdrawalId: '',
+                    lastCreditedSubmissionId: submissionId,
                   },
                   ['createdAt', 'updatedAt']
                 )
@@ -1096,22 +1156,45 @@ async function startServer() {
                   feeAmount: 0,
                   netAmount: rewardAmount,
                   direction: 'credit',
-                  description: `Task reward credited for ${submission.data.taskCode} (${String(submission.data.taskTitle || '').slice(0, 140)})`.slice(0, 240),
+                  description: `Task reward credited for ${taskCode} (${taskTitle.slice(0, 140)})`.slice(0, 240),
                   referenceId: submissionId,
+                  taskName: taskTitle,
+                  submissionId,
+                  approvedAt: nowIso,
                 },
                 ['createdAt']
+              ),
+              buildCreateWrite(
+                'notifications',
+                notifId,
+                {
+                  notificationId: notifId,
+                  userId: memberUid,
+                  type: 'task_approved',
+                  title: 'Official Task Approved',
+                  message: `Your proof for "${taskTitle}" (${taskCode}) was approved and ৳${rewardAmount} was credited to your wallet.`.slice(
+                    0,
+                    900
+                  ),
+                  referenceId: submissionId,
+                  isRead: false,
+                },
+                ['createdAt', 'updatedAt']
               ),
               buildCreateWrite(
                 'adminAuditLogs',
                 logId,
                 {
                   logId,
-                  adminUid: admin.uid,
-                  adminEmail: admin.email,
+                  adminUid: reviewerAuth.uid,
+                  adminEmail: reviewerAuth.email || reviewerInfo.reviewerId,
                   action: 'SUBMISSION_APPROVED',
                   targetType: 'submission',
                   targetId: submissionId,
-                  summary: `Approved proof for ${submission.data.taskCode} by ${memberCode} and credited ৳${rewardAmount}`.slice(0, 450),
+                  summary: `[${reviewerInfo.role === 'admin' ? 'Main Admin' : 'Assistant Admin'} ${reviewerInfo.reviewerId}] Approved proof for ${taskCode} by ${memberCode} and credited ৳${rewardAmount}`.slice(
+                    0,
+                    450
+                  ),
                 },
                 ['createdAt']
               )
@@ -1134,16 +1217,36 @@ async function startServer() {
             }
             writes.push(
               buildCreateWrite(
+                'notifications',
+                notifId,
+                {
+                  notificationId: notifId,
+                  userId: memberUid,
+                  type: 'task_rejected',
+                  title: 'Official Task Proof Rejected',
+                  message: `Your proof for "${taskTitle}" (${taskCode}) was rejected. Reason: ${rejectionReason}`.slice(
+                    0,
+                    900
+                  ),
+                  referenceId: submissionId,
+                  isRead: false,
+                },
+                ['createdAt', 'updatedAt']
+              ),
+              buildCreateWrite(
                 'adminAuditLogs',
                 logId,
                 {
                   logId,
-                  adminUid: admin.uid,
-                  adminEmail: admin.email,
+                  adminUid: reviewerAuth.uid,
+                  adminEmail: reviewerAuth.email || reviewerInfo.reviewerId,
                   action: 'SUBMISSION_REJECTED',
                   targetType: 'submission',
                   targetId: submissionId,
-                  summary: `Rejected proof for ${submission.data.taskCode} by ${memberCode}: ${rejectionReason}`.slice(0, 450),
+                  summary: `[${reviewerInfo.role === 'admin' ? 'Main Admin' : 'Assistant Admin'} ${reviewerInfo.reviewerId}] Rejected proof for ${taskCode} by ${memberCode}: ${rejectionReason}`.slice(
+                    0,
+                    450
+                  ),
                 },
                 ['createdAt']
               )
@@ -1406,6 +1509,767 @@ async function startServer() {
           ];
 
           return { writes, result: true };
+        });
+
+        res.json({ ok: true });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  // =========================================================================
+  // 8. Assistant Admin Creation & Management (Main Admin Exclusive)
+  // =========================================================================
+  app.post(
+    '/api/admin/assistants',
+    requireVerifiedAuth,
+    async (req: AuthedRequest, res: Response, next: NextFunction) => {
+      try {
+        const admin = req.authUser!;
+        await assertCallerIsAdmin(admin);
+
+        const fullName = typeof req.body?.fullName === 'string' ? req.body.fullName.trim().slice(0, 100) : '';
+        const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+        const password = typeof req.body?.password === 'string' ? req.body.password : '';
+        const phone = typeof req.body?.phone === 'string' ? req.body.phone.trim().slice(0, 25) : '';
+
+        if (fullName.length < 2) {
+          throw new HttpError(400, 'Assistant Admin full name must be between 2 and 100 characters.');
+        }
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 150) {
+          throw new HttpError(400, 'Enter a valid email address for the Assistant Admin.');
+        }
+        if (password.length < 6 || password.length > 128) {
+          throw new HttpError(400, 'Password must be between 6 and 128 characters.');
+        }
+        if (phone && !BD_PHONE_REGEX.test(phone)) {
+          throw new HttpError(400, 'Enter a valid Bangladeshi phone number (e.g., 01712345678).');
+        }
+
+        // Create Firebase Auth user via Identity Toolkit REST API so Main Admin stays signed in
+        const signUpRes = await fetch(
+          `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${encodeURIComponent(firebaseConfig.apiKey)}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              email,
+              password,
+              returnSecureToken: true,
+            }),
+          }
+        );
+
+        const signUpBody = (await signUpRes.json().catch(() => ({}))) as {
+          localId?: string;
+          idToken?: string;
+          error?: { message?: string };
+        };
+
+        if (!signUpRes.ok || !signUpBody.localId) {
+          const code = signUpBody.error?.message || '';
+          if (code.includes('EMAIL_EXISTS')) {
+            throw new HttpError(
+              409,
+              'An account with this email already exists. Promote that existing account directly in the Assistant Admins section.'
+            );
+          }
+          if (code.includes('OPERATION_NOT_ALLOWED')) {
+            throw new HttpError(
+              400,
+              'Email/Password sign-in is disabled in Firebase Console. Enable Email/Password or promote a Google-registered member.'
+            );
+          }
+          throw new HttpError(400, `Could not create Assistant Admin credentials: ${code || 'Invalid input'}`);
+        }
+
+        const newUid = signUpBody.localId;
+        if (signUpBody.idToken) {
+          await fetch(
+            `https://identitytoolkit.googleapis.com/v1/accounts:update?key=${encodeURIComponent(firebaseConfig.apiKey)}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                idToken: signUpBody.idToken,
+                displayName: fullName,
+                returnSecureToken: false,
+              }),
+            }
+          ).catch(() => undefined);
+        }
+
+        const memberId = generateNumericCode('MTS', 6);
+        const logId = generateDocId('log');
+
+        await commitSingleOrBatchWrites(admin.idToken, [
+          buildCreateWrite(
+            'assistantAdmins',
+            newUid,
+            {
+              uid: newUid,
+              memberId,
+              fullName,
+              email,
+              createdBy: admin.uid,
+            },
+            ['createdAt']
+          ),
+          buildCreateWrite(
+            'users',
+            newUid,
+            {
+              uid: newUid,
+              memberId,
+              fullName,
+              email,
+              phone,
+              authProvider: 'password',
+              photoAssetId: '',
+              role: 'assistant_admin',
+              status: 'approved',
+              rejectionReason: '',
+              completedTasksCount: 0,
+              pendingSubmissionsCount: 0,
+              totalEarnings: 0,
+              lastPasswordChangedAt: '',
+            },
+            ['createdAt', 'updatedAt']
+          ),
+          buildCreateWrite(
+            'wallets',
+            newUid,
+            {
+              userId: newUid,
+              memberId,
+              availableBalance: 0,
+              totalEarnings: 0,
+              totalWithdrawals: 0,
+              totalWithdrawalFees: 0,
+              reservedWithdrawals: 0,
+              lastWithdrawalId: '',
+            },
+            ['createdAt', 'updatedAt']
+          ),
+          buildCreateWrite(
+            'adminAuditLogs',
+            logId,
+            {
+              logId,
+              adminUid: admin.uid,
+              adminEmail: admin.email,
+              action: 'ASSISTANT_ADMIN_CREATED',
+              targetType: 'assistantAdmin',
+              targetId: newUid,
+              summary: `Created Assistant Admin account ${memberId} (${fullName} · ${email})`.slice(0, 450),
+            },
+            ['createdAt']
+          ),
+        ]);
+
+        res.json({ ok: true, uid: newUid, memberId });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  app.post(
+    '/api/admin/assistants/:targetUid/role',
+    requireVerifiedAuth,
+    async (req: AuthedRequest, res: Response, next: NextFunction) => {
+      try {
+        const admin = req.authUser!;
+        await assertCallerIsAdmin(admin);
+
+        const targetUid = String(req.params.targetUid || '');
+        const action = req.body?.action;
+        const reason =
+          typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 300) : '';
+
+        if (!VALID_ID_REGEX.test(targetUid)) {
+          throw new HttpError(400, 'Invalid target account ID.');
+        }
+        if (action !== 'promote' && action !== 'suspend' && action !== 'reactivate' && action !== 'demote') {
+          throw new HttpError(400, 'Action must be promote, suspend, reactivate, or demote.');
+        }
+
+        await runAtomicTransaction(admin.idToken, async (tx) => {
+          const targetUser = await tx.get('users', targetUid);
+          if (!targetUser) {
+            throw new HttpError(404, 'Target account not found.');
+          }
+          if (targetUser.data.role === 'admin' || targetUid === admin.uid) {
+            throw new HttpError(400, 'Cannot modify Main Admin role.');
+          }
+
+          const existingAssistant = await tx.get('assistantAdmins', targetUid);
+          const logId = generateDocId('log');
+          const writes = [];
+
+          if (action === 'promote' || action === 'reactivate') {
+            writes.push(
+              buildReplaceUpdateWrite(
+                'users',
+                targetUid,
+                {
+                  ...targetUser.data,
+                  role: 'assistant_admin',
+                  status: 'approved',
+                  rejectionReason: '',
+                  createdAt: preserveTimestamp(targetUser.raw, 'createdAt'),
+                },
+                targetUser.updateTime
+              )
+            );
+            if (!existingAssistant) {
+              writes.push(
+                buildCreateWrite(
+                  'assistantAdmins',
+                  targetUid,
+                  {
+                    uid: targetUid,
+                    memberId: String(targetUser.data.memberId),
+                    fullName: String(targetUser.data.fullName),
+                    email: String(targetUser.data.email),
+                    createdBy: admin.uid,
+                  },
+                  ['createdAt']
+                )
+              );
+            }
+          } else if (action === 'suspend') {
+            writes.push(
+              buildReplaceUpdateWrite(
+                'users',
+                targetUid,
+                {
+                  ...targetUser.data,
+                  role: 'assistant_admin',
+                  status: 'rejected',
+                  rejectionReason: reason || 'Assistant Admin access suspended by Main Admin',
+                  createdAt: preserveTimestamp(targetUser.raw, 'createdAt'),
+                },
+                targetUser.updateTime
+              )
+            );
+            if (existingAssistant) {
+              writes.push(buildDeleteWrite('assistantAdmins', targetUid));
+            }
+          } else {
+            // demote back to approved member
+            writes.push(
+              buildReplaceUpdateWrite(
+                'users',
+                targetUid,
+                {
+                  ...targetUser.data,
+                  role: 'member',
+                  status: 'approved',
+                  rejectionReason: '',
+                  createdAt: preserveTimestamp(targetUser.raw, 'createdAt'),
+                },
+                targetUser.updateTime
+              )
+            );
+            if (existingAssistant) {
+              writes.push(buildDeleteWrite('assistantAdmins', targetUid));
+            }
+          }
+
+          writes.push(
+            buildCreateWrite(
+              'adminAuditLogs',
+              logId,
+              {
+                logId,
+                adminUid: admin.uid,
+                adminEmail: admin.email,
+                action: `ASSISTANT_ADMIN_${String(action).toUpperCase()}`,
+                targetType: 'assistantAdmin',
+                targetId: targetUid,
+                summary: `${String(action).toUpperCase()} Assistant Admin role for ${targetUser.data.memberId} (${targetUser.data.fullName})`.slice(
+                  0,
+                  450
+                ),
+              },
+              ['createdAt']
+            )
+          );
+
+          return { writes, result: true };
+        });
+
+        res.json({ ok: true });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  // =========================================================================
+  // 9. Custom Task Submission, Assistant Review & Main Admin Payment Approval
+  // =========================================================================
+
+  // 9A. Approved Member Submits Custom Task (Never credits wallet on submit)
+  app.post(
+    '/api/custom-tasks',
+    requireVerifiedAuth,
+    async (req: AuthedRequest, res: Response, next: NextFunction) => {
+      try {
+        const user = req.authUser!;
+        const taskName =
+          typeof req.body?.taskName === 'string' ? req.body.taskName.trim().slice(0, 140) : '';
+        const taskDetails =
+          typeof req.body?.taskDetails === 'string' ? req.body.taskDetails.trim().slice(0, 2000) : '';
+        const requestedAmount = Number(req.body?.requestedAmount);
+        const screenshotAssetId =
+          typeof req.body?.screenshotAssetId === 'string' ? req.body.screenshotAssetId.trim() : '';
+
+        if (taskName.length < 2) {
+          throw new HttpError(400, 'Task Name must be at least 2 characters.');
+        }
+        if (taskDetails.length < 5) {
+          throw new HttpError(400, 'Task Details must be at least 5 characters.');
+        }
+        if (!Number.isFinite(requestedAmount) || !Number.isInteger(requestedAmount) || requestedAmount < 1 || requestedAmount > 100000) {
+          throw new HttpError(400, 'Requested Amount must be a whole Taka integer between ৳1 and ৳100,000.');
+        }
+        if (screenshotAssetId && !VALID_ID_REGEX.test(screenshotAssetId)) {
+          throw new HttpError(400, 'Invalid proof screenshot reference.');
+        }
+
+        const customTaskId = generateDocId('ctk');
+        const customTaskCode = generateNumericCode('CTK', 5);
+
+        await runAtomicTransaction(user.idToken, async (tx) => {
+          const profile = await tx.get('users', user.uid);
+          if (!profile || profile.data.status !== 'approved') {
+            throw new HttpError(403, 'Your account must be approved before submitting a custom task.');
+          }
+
+          if (screenshotAssetId) {
+            const asset = await tx.get('mediaAssets', screenshotAssetId);
+            if (!asset || asset.data.ownerId !== user.uid || asset.data.purpose !== 'proof') {
+              throw new HttpError(403, 'Invalid proof screenshot asset.');
+            }
+          }
+
+          const writes = [
+            buildCreateWrite(
+              'customTasks',
+              customTaskId,
+              {
+                customTaskId,
+                customTaskCode,
+                userId: user.uid,
+                memberId: String(profile.data.memberId),
+                memberName: String(profile.data.fullName),
+                taskName,
+                taskDetails,
+                requestedAmount,
+                approvedAmount: 0,
+                screenshotAssetId,
+                status: 'pending',
+                assistantStatus: 'unreviewed',
+                assistantNote: '',
+                assistantReviewedBy: '',
+                assistantReviewerId: '',
+                assistantReviewerName: '',
+                assistantReviewedAt: '',
+                rejectionReason: '',
+                reviewedBy: '',
+                reviewerId: '',
+                reviewerName: '',
+                reviewedAt: '',
+                transactionId: '',
+              },
+              ['createdAt', 'updatedAt']
+            ),
+          ];
+
+          return { writes, result: true };
+        });
+
+        res.json({ ok: true, customTaskId, customTaskCode });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  // 9B. Assistant Admin (or Main Admin) Inspects Custom Task & Recommends (Zero Wallet Credit)
+  app.post(
+    '/api/admin/custom-tasks/:customTaskId/assist-review',
+    requireVerifiedAuth,
+    async (req: AuthedRequest, res: Response, next: NextFunction) => {
+      try {
+        const reviewerAuth = req.authUser!;
+        const reviewerInfo = await assertCallerIsAdminOrAssistant(reviewerAuth);
+
+        const customTaskId = String(req.params.customTaskId || '');
+        const assistantStatus = req.body?.assistantStatus;
+        const assistantNote =
+          typeof req.body?.assistantNote === 'string' ? req.body.assistantNote.trim().slice(0, 300) : '';
+
+        if (!VALID_ID_REGEX.test(customTaskId)) {
+          throw new HttpError(400, 'Invalid custom task ID.');
+        }
+        if (
+          assistantStatus !== 'reviewed' &&
+          assistantStatus !== 'recommended_approve' &&
+          assistantStatus !== 'recommended_reject'
+        ) {
+          throw new HttpError(400, 'Invalid inspection status.');
+        }
+        if (assistantStatus === 'recommended_reject' && assistantNote.length < 3) {
+          throw new HttpError(400, 'Please enter a recommendation note (at least 3 characters) when recommending rejection.');
+        }
+
+        const nowIso = new Date().toISOString();
+
+        await runAtomicTransaction(reviewerAuth.idToken, async (tx) => {
+          const customTask = await tx.get('customTasks', customTaskId);
+          if (!customTask) {
+            throw new HttpError(404, 'Custom task submission not found.');
+          }
+          if (customTask.data.status !== 'pending') {
+            throw new HttpError(409, `Custom task has already been ${customTask.data.status} by Main Admin.`);
+          }
+
+          const logId = generateDocId('log');
+          const writes = [
+            buildReplaceUpdateWrite(
+              'customTasks',
+              customTaskId,
+              {
+                ...customTask.data,
+                assistantStatus,
+                assistantNote,
+                assistantReviewedBy: reviewerAuth.uid,
+                assistantReviewerId: reviewerInfo.reviewerId,
+                assistantReviewerName: reviewerInfo.reviewerName,
+                assistantReviewedAt: nowIso,
+                createdAt: preserveTimestamp(customTask.raw, 'createdAt'),
+              },
+              customTask.updateTime
+            ),
+            buildCreateWrite(
+              'adminAuditLogs',
+              logId,
+              {
+                logId,
+                adminUid: reviewerAuth.uid,
+                adminEmail: reviewerAuth.email || reviewerInfo.reviewerId,
+                action: 'CUSTOM_TASK_INSPECTED',
+                targetType: 'customTask',
+                targetId: customTaskId,
+                summary: `[${reviewerInfo.reviewerId}] Marked custom task ${customTask.data.customTaskCode} as ${assistantStatus}${assistantNote ? `: ${assistantNote}` : ''}`.slice(
+                  0,
+                  450
+                ),
+              },
+              ['createdAt']
+            ),
+          ];
+
+          return { writes, result: true };
+        });
+
+        res.json({ ok: true });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  // 9C. Main Admin Exclusive Final Approval or Rejection of Custom Task Payment
+  app.post(
+    '/api/admin/custom-tasks/:customTaskId/decision',
+    requireVerifiedAuth,
+    async (req: AuthedRequest, res: Response, next: NextFunction) => {
+      try {
+        const admin = req.authUser!;
+        const adminInfo = await assertCallerIsAdmin(admin);
+
+        const customTaskId = String(req.params.customTaskId || '');
+        const decision = req.body?.decision;
+        const rawApprovedAmount = req.body?.approvedAmount;
+        const rawReason =
+          typeof req.body?.rejectionReason === 'string' ? req.body.rejectionReason.trim().slice(0, 300) : '';
+
+        if (!VALID_ID_REGEX.test(customTaskId)) {
+          throw new HttpError(400, 'Invalid custom task ID.');
+        }
+        if (decision !== 'approved' && decision !== 'rejected') {
+          throw new HttpError(400, 'Decision must be approved or rejected.');
+        }
+        if (decision === 'rejected' && rawReason.length < 3) {
+          throw new HttpError(400, 'Please provide a rejection reason (at least 3 characters).');
+        }
+
+        const nowIso = new Date().toISOString();
+
+        await runAtomicTransaction(admin.idToken, async (tx) => {
+          const customTask = await tx.get('customTasks', customTaskId);
+          if (!customTask) {
+            throw new HttpError(404, 'Custom task submission not found.');
+          }
+          if (customTask.data.status !== 'pending') {
+            throw new HttpError(
+              409,
+              `Custom task ${customTask.data.customTaskCode} has already been ${customTask.data.status}. Duplicate payment prevented.`
+            );
+          }
+
+          const memberUid = String(customTask.data.userId);
+          const memberCode = String(customTask.data.memberId || 'MTS-000000');
+          const taskName = String(customTask.data.taskName || 'Custom Task').slice(0, 400);
+          const customCode = String(customTask.data.customTaskCode || 'CTK-00000');
+          const requestedAmount = Number(customTask.data.requestedAmount);
+
+          const finalApprovedAmount =
+            decision === 'approved'
+              ? rawApprovedAmount !== undefined && rawApprovedAmount !== null && String(rawApprovedAmount) !== ''
+                ? Number(rawApprovedAmount)
+                : requestedAmount
+              : 0;
+
+          if (
+            decision === 'approved' &&
+            (!Number.isFinite(finalApprovedAmount) ||
+              !Number.isInteger(finalApprovedAmount) ||
+              finalApprovedAmount < 1 ||
+              finalApprovedAmount > 100000)
+          ) {
+            throw new HttpError(400, 'Approved amount must be a whole Taka integer between ৳1 and ৳100,000.');
+          }
+
+          const memberProfile = await tx.get('users', memberUid);
+          const memberWallet = await tx.get('wallets', memberUid);
+
+          const txLedgerId = decision === 'approved' ? `tx_custom_${customTaskId}` : '';
+          const notifId = generateDocId('ntf');
+          const logId = generateDocId('log');
+
+          const writes = [
+            buildReplaceUpdateWrite(
+              'customTasks',
+              customTaskId,
+              {
+                ...customTask.data,
+                status: decision,
+                approvedAmount: finalApprovedAmount,
+                rejectionReason: decision === 'rejected' ? rawReason : '',
+                reviewedBy: admin.uid,
+                reviewerId: adminInfo.reviewerId,
+                reviewerName: adminInfo.reviewerName,
+                reviewedAt: nowIso,
+                transactionId: txLedgerId,
+                createdAt: preserveTimestamp(customTask.raw, 'createdAt'),
+              },
+              customTask.updateTime
+            ),
+          ];
+
+          if (decision === 'approved') {
+            if (memberWallet) {
+              const prevAvail = Number(memberWallet.data.availableBalance || 0);
+              const prevWalletEarnings = Number(memberWallet.data.totalEarnings || 0);
+              writes.push(
+                buildReplaceUpdateWrite(
+                  'wallets',
+                  memberUid,
+                  {
+                    ...memberWallet.data,
+                    availableBalance: prevAvail + finalApprovedAmount,
+                    totalEarnings: prevWalletEarnings + finalApprovedAmount,
+                    lastCreditedSubmissionId: customTaskId,
+                    createdAt: preserveTimestamp(memberWallet.raw, 'createdAt'),
+                  },
+                  memberWallet.updateTime
+                )
+              );
+            } else {
+              writes.push(
+                buildCreateWrite(
+                  'wallets',
+                  memberUid,
+                  {
+                    userId: memberUid,
+                    memberId: memberCode,
+                    availableBalance: finalApprovedAmount,
+                    totalEarnings: finalApprovedAmount,
+                    totalWithdrawals: 0,
+                    totalWithdrawalFees: 0,
+                    reservedWithdrawals: 0,
+                    lastWithdrawalId: '',
+                    lastCreditedSubmissionId: customTaskId,
+                  },
+                  ['createdAt', 'updatedAt']
+                )
+              );
+            }
+
+            if (memberProfile) {
+              const prevCompleted = Number(memberProfile.data.completedTasksCount || 0);
+              const prevUserEarnings = Number(memberProfile.data.totalEarnings || 0);
+              writes.push(
+                buildReplaceUpdateWrite(
+                  'users',
+                  memberUid,
+                  {
+                    ...memberProfile.data,
+                    completedTasksCount: prevCompleted + 1,
+                    totalEarnings: prevUserEarnings + finalApprovedAmount,
+                    createdAt: preserveTimestamp(memberProfile.raw, 'createdAt'),
+                  },
+                  memberProfile.updateTime
+                )
+              );
+            }
+
+            writes.push(
+              buildCreateWrite(
+                'transactions',
+                txLedgerId,
+                {
+                  transactionId: txLedgerId,
+                  userId: memberUid,
+                  memberId: memberCode,
+                  type: 'custom_task_reward',
+                  amount: finalApprovedAmount,
+                  feeAmount: 0,
+                  netAmount: finalApprovedAmount,
+                  direction: 'credit',
+                  description: `Custom task payment credited for ${customCode} (${taskName.slice(0, 140)})`.slice(0, 240),
+                  referenceId: customTaskId,
+                  taskName,
+                  submissionId: customTaskId,
+                  approvedAt: nowIso,
+                },
+                ['createdAt']
+              ),
+              buildCreateWrite(
+                'notifications',
+                notifId,
+                {
+                  notificationId: notifId,
+                  userId: memberUid,
+                  type: 'custom_task_approved',
+                  title: 'Custom Task Approved & Paid',
+                  message: `Your custom task "${taskName}" (${customCode}) was approved by Admin and ৳${finalApprovedAmount} has been credited to your wallet.`.slice(
+                    0,
+                    900
+                  ),
+                  referenceId: customTaskId,
+                  isRead: false,
+                },
+                ['createdAt', 'updatedAt']
+              ),
+              buildCreateWrite(
+                'adminAuditLogs',
+                logId,
+                {
+                  logId,
+                  adminUid: admin.uid,
+                  adminEmail: admin.email,
+                  action: 'CUSTOM_TASK_APPROVED',
+                  targetType: 'customTask',
+                  targetId: customTaskId,
+                  summary: `Approved custom task ${customCode} ("${taskName}") for ${memberCode} and credited ৳${finalApprovedAmount}`.slice(
+                    0,
+                    450
+                  ),
+                },
+                ['createdAt']
+              )
+            );
+          } else {
+            writes.push(
+              buildCreateWrite(
+                'notifications',
+                notifId,
+                {
+                  notificationId: notifId,
+                  userId: memberUid,
+                  type: 'custom_task_rejected',
+                  title: 'Custom Task Not Approved',
+                  message: `Your custom task "${taskName}" (${customCode}) was rejected. Reason: ${rawReason}`.slice(
+                    0,
+                    900
+                  ),
+                  referenceId: customTaskId,
+                  isRead: false,
+                },
+                ['createdAt', 'updatedAt']
+              ),
+              buildCreateWrite(
+                'adminAuditLogs',
+                logId,
+                {
+                  logId,
+                  adminUid: admin.uid,
+                  adminEmail: admin.email,
+                  action: 'CUSTOM_TASK_REJECTED',
+                  targetType: 'customTask',
+                  targetId: customTaskId,
+                  summary: `Rejected custom task ${customCode} ("${taskName}") for ${memberCode}: ${rawReason}`.slice(
+                    0,
+                    450
+                  ),
+                },
+                ['createdAt']
+              )
+            );
+          }
+
+          return { writes, result: true };
+        });
+
+        res.json({ ok: true });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  // 10. Member Marks Decision Notification as Read
+  app.post(
+    '/api/notifications/:notificationId/read',
+    requireVerifiedAuth,
+    async (req: AuthedRequest, res: Response, next: NextFunction) => {
+      try {
+        const user = req.authUser!;
+        const notificationId = String(req.params.notificationId || '');
+        if (!VALID_ID_REGEX.test(notificationId)) {
+          throw new HttpError(400, 'Invalid notification ID.');
+        }
+
+        await runAtomicTransaction(user.idToken, async (tx) => {
+          const notif = await tx.get('notifications', notificationId);
+          if (!notif || notif.data.userId !== user.uid) {
+            throw new HttpError(404, 'Notification not found.');
+          }
+          if (notif.data.isRead === true) {
+            return { writes: [], result: true };
+          }
+          return {
+            writes: [
+              buildReplaceUpdateWrite(
+                'notifications',
+                notificationId,
+                {
+                  ...notif.data,
+                  isRead: true,
+                  createdAt: preserveTimestamp(notif.raw, 'createdAt'),
+                },
+                notif.updateTime
+              ),
+            ],
+            result: true,
+          };
         });
 
         res.json({ ok: true });

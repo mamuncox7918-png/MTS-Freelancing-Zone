@@ -5,12 +5,24 @@ import {
   assertSucceeds,
   RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { doc, getDoc, setDoc, updateDoc, serverTimestamp, collection, getDocs, query, where } from 'firebase/firestore';
+import {
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+  serverTimestamp,
+  collection,
+  getDocs,
+  query,
+  where,
+  writeBatch,
+} from 'firebase/firestore';
 
 /**
  * Security Rules Verification Suite — MTS Freelancing Zone
  * Verifies all 12 "Dirty Dozen" adversarial payloads defined in security_spec.md
- * return PERMISSION_DENIED, while valid RBAC and atomic transactions succeed.
+ * return PERMISSION_DENIED, while valid RBAC (Main Admin, Assistant Admin, Approved Member)
+ * and atomic single-credit wallet transactions succeed.
  */
 export async function runFirestoreRulesAudit(emulatorHost = '127.0.0.1', emulatorPort = 8080) {
   const testEnv: RulesTestEnvironment = await initializeTestEnvironment({
@@ -26,6 +38,32 @@ export async function runFirestoreRulesAudit(emulatorHost = '127.0.0.1', emulato
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       const adminDb = ctx.firestore();
       const now = new Date();
+      await setDoc(doc(adminDb, 'assistantAdmins', 'assistant_1'), {
+        uid: 'assistant_1',
+        memberId: 'MTS-900001',
+        fullName: 'Assistant Reviewer One',
+        email: 'assistant1@example.com',
+        createdBy: 'admin_1',
+        createdAt: now,
+      });
+      await setDoc(doc(adminDb, 'users', 'assistant_1'), {
+        uid: 'assistant_1',
+        memberId: 'MTS-900001',
+        fullName: 'Assistant Reviewer One',
+        email: 'assistant1@example.com',
+        phone: '01711111111',
+        authProvider: 'password',
+        photoAssetId: '',
+        role: 'assistant_admin',
+        status: 'approved',
+        rejectionReason: '',
+        completedTasksCount: 0,
+        pendingSubmissionsCount: 0,
+        totalEarnings: 0,
+        lastPasswordChangedAt: '',
+        createdAt: now,
+        updatedAt: now,
+      });
       await setDoc(doc(adminDb, 'users', 'member_1'), {
         uid: 'member_1',
         memberId: 'MTS-100001',
@@ -38,26 +76,8 @@ export async function runFirestoreRulesAudit(emulatorHost = '127.0.0.1', emulato
         status: 'approved',
         rejectionReason: '',
         completedTasksCount: 0,
-        pendingSubmissionsCount: 0,
+        pendingSubmissionsCount: 1,
         totalEarnings: 200,
-        lastPasswordChangedAt: '',
-        createdAt: now,
-        updatedAt: now,
-      });
-      await setDoc(doc(adminDb, 'users', 'pending_1'), {
-        uid: 'pending_1',
-        memberId: 'MTS-100002',
-        fullName: 'Pending Member',
-        email: 'p1@example.com',
-        phone: '01712345679',
-        authProvider: 'password',
-        photoAssetId: '',
-        role: 'member',
-        status: 'pending',
-        rejectionReason: '',
-        completedTasksCount: 0,
-        pendingSubmissionsCount: 0,
-        totalEarnings: 0,
         lastPasswordChangedAt: '',
         createdAt: now,
         updatedAt: now,
@@ -107,6 +127,24 @@ export async function runFirestoreRulesAudit(emulatorHost = '127.0.0.1', emulato
         sizeBytes: 64,
         createdAt: now,
       });
+      await setDoc(doc(adminDb, 'submissions', 'sub_pending_1'), {
+        submissionId: 'sub_pending_1',
+        taskId: 'tsk_1',
+        taskCode: 'TSK-10001',
+        taskTitle: 'Official Channel Subscription',
+        rewardAmount: 20,
+        userId: 'member_1',
+        memberId: 'MTS-100001',
+        memberName: 'Approved Member One',
+        screenshotAssetId: 'asset_m1',
+        submissionNote: 'Completed official task',
+        status: 'pending',
+        rejectionReason: '',
+        reviewedBy: '',
+        reviewedAt: '',
+        createdAt: now,
+        updatedAt: now,
+      });
       await setDoc(doc(adminDb, 'submissions', 'sub_done'), {
         submissionId: 'sub_done',
         taskId: 'tsk_1',
@@ -125,16 +163,62 @@ export async function runFirestoreRulesAudit(emulatorHost = '127.0.0.1', emulato
         createdAt: now,
         updatedAt: now,
       });
+      await setDoc(doc(adminDb, 'customTasks', 'ctk_pending_1'), {
+        customTaskId: 'ctk_pending_1',
+        customTaskCode: 'CTK-10001',
+        userId: 'member_1',
+        memberId: 'MTS-100001',
+        memberName: 'Approved Member One',
+        taskName: 'Extra Video Editing Work',
+        taskDetails: 'Edited promotional reel outside official task list.',
+        requestedAmount: 150,
+        approvedAmount: 0,
+        screenshotAssetId: '',
+        status: 'pending',
+        assistantStatus: 'unreviewed',
+        assistantNote: '',
+        assistantReviewedBy: '',
+        assistantReviewerId: '',
+        assistantReviewerName: '',
+        assistantReviewedAt: '',
+        rejectionReason: '',
+        reviewedBy: '',
+        reviewerId: '',
+        reviewerName: '',
+        reviewedAt: '',
+        transactionId: '',
+        createdAt: now,
+        updatedAt: now,
+      });
+      await setDoc(doc(adminDb, 'withdrawals', 'wdr_1'), {
+        withdrawalId: 'wdr_1',
+        transactionCode: 'WDR-100001',
+        userId: 'member_1',
+        memberId: 'MTS-100001',
+        memberName: 'Approved Member One',
+        payoutMethod: 'bKash',
+        accountNumber: '01712345678',
+        grossAmount: 100,
+        feeAmount: 5,
+        netAmount: 95,
+        status: 'pending',
+        adminNote: '',
+        paymentReference: '',
+        processedBy: '',
+        processedAt: '',
+        createdAt: now,
+        updatedAt: now,
+      });
     });
 
     const member1Db = testEnv.authenticatedContext('member_1', {
       email: 'm1@example.com',
-      email_verified: true,
+      email_verified: false,
     }).firestore();
 
-    const pendingDb = testEnv.authenticatedContext('pending_1', {
-      email: 'p1@example.com',
-      email_verified: true,
+    const assistantDb = testEnv.authenticatedContext('assistant_1', {
+      email: 'assistant1@example.com',
+      email_verified: false,
     }).firestore();
 
     const attackerDb = testEnv.authenticatedContext('attacker_1', {
@@ -152,7 +236,7 @@ export async function runFirestoreRulesAudit(emulatorHost = '127.0.0.1', emulato
       email_verified: true,
     }).firestore();
 
-    // Dirty Dozen #1: Self-assigned admin role during registration
+    // Dirty Dozen #1: Self-assigned assistant_admin role during registration
     await assertFails(
       setDoc(doc(attackerDb, 'users', 'attacker_1'), {
         uid: 'attacker_1',
@@ -162,7 +246,7 @@ export async function runFirestoreRulesAudit(emulatorHost = '127.0.0.1', emulato
         phone: '01700000000',
         authProvider: 'password',
         photoAssetId: '',
-        role: 'admin',
+        role: 'assistant_admin',
         status: 'approved',
         rejectionReason: '',
         completedTasksCount: 0,
@@ -174,16 +258,119 @@ export async function runFirestoreRulesAudit(emulatorHost = '127.0.0.1', emulato
       })
     );
 
-    // Dirty Dozen #2: Shadow field injection on profile update
+    // Dirty Dozen #2: Assistant Admin attempting to create another Assistant Admin
     await assertFails(
-      updateDoc(doc(member1Db, 'users', 'member_1'), {
-        fullName: 'Updated Name',
-        isVerifiedAdmin: true,
+      setDoc(doc(assistantDb, 'assistantAdmins', 'assistant_2'), {
+        uid: 'assistant_2',
+        memberId: 'MTS-900002',
+        fullName: 'Unauthorized Assistant',
+        email: 'assistant2@example.com',
+        createdBy: 'assistant_1',
+        createdAt: serverTimestamp(),
+      })
+    );
+
+    // Dirty Dozen #3: Assistant Admin attempting manual wallet balance modification
+    await assertFails(
+      updateDoc(doc(assistantDb, 'wallets', 'member_1'), {
+        availableBalance: 99999,
+        totalEarnings: 99999,
         updatedAt: serverTimestamp(),
       })
     );
 
-    // Dirty Dozen #3: Unverified admin email spoofing
+    // Dirty Dozen #4: Assistant Admin attempting withdrawal approval
+    await assertFails(
+      updateDoc(doc(assistantDb, 'withdrawals', 'wdr_1'), {
+        status: 'paid',
+        paymentReference: 'TX123',
+        adminNote: 'Paid by assistant',
+        processedBy: 'assistant_1',
+        processedAt: new Date().toISOString(),
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    // Dirty Dozen #5: Assistant Admin attempting final Custom Task payment approval
+    await assertFails(
+      updateDoc(doc(assistantDb, 'customTasks', 'ctk_pending_1'), {
+        status: 'approved',
+        approvedAmount: 150,
+        rejectionReason: '',
+        reviewedBy: 'assistant_1',
+        reviewerId: 'MTS-900001',
+        reviewerName: 'Assistant Reviewer One',
+        reviewedAt: new Date().toISOString(),
+        transactionId: 'tx_custom_ctk_pending_1',
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    // Dirty Dozen #6: Member submitting pre-approved Custom Task
+    await assertFails(
+      setDoc(doc(member1Db, 'customTasks', 'ctk_forged'), {
+        customTaskId: 'ctk_forged',
+        customTaskCode: 'CTK-99999',
+        userId: 'member_1',
+        memberId: 'MTS-100001',
+        memberName: 'Approved Member One',
+        taskName: 'Forged Custom Task',
+        taskDetails: 'Attempting to pre-approve custom task.',
+        requestedAmount: 5000,
+        approvedAmount: 5000,
+        screenshotAssetId: '',
+        status: 'approved',
+        assistantStatus: 'unreviewed',
+        assistantNote: '',
+        assistantReviewedBy: '',
+        assistantReviewerId: '',
+        assistantReviewerName: '',
+        assistantReviewedAt: '',
+        rejectionReason: '',
+        reviewedBy: '',
+        reviewerId: '',
+        reviewerName: '',
+        reviewedAt: '',
+        transactionId: '',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    // Dirty Dozen #7: Task rejection without required rejection reason
+    await assertFails(
+      updateDoc(doc(assistantDb, 'submissions', 'sub_pending_1'), {
+        status: 'rejected',
+        rejectionReason: '',
+        reviewedBy: 'assistant_1',
+        reviewerId: 'MTS-900001',
+        reviewerName: 'Assistant Reviewer One',
+        reviewerRole: 'assistant_admin',
+        reviewAction: 'rejected',
+        reviewedAt: new Date().toISOString(),
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    // Dirty Dozen #8: Duplicate approval of already-approved submission
+    await assertFails(
+      updateDoc(doc(realAdminDb, 'submissions', 'sub_done'), {
+        status: 'approved',
+        rejectionReason: '',
+        reviewedBy: 'admin_1',
+        reviewedAt: new Date().toISOString(),
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    // Dirty Dozen #9: Cross-member wallet read & unfiltered custom task list
+    await assertFails(getDoc(doc(member1Db, 'wallets', 'member_2')));
+    await assertFails(getDocs(collection(member1Db, 'customTasks')));
+    await assertSucceeds(
+      getDocs(query(collection(member1Db, 'customTasks'), where('userId', '==', 'member_1')))
+    );
+
+    // Dirty Dozen #10: Unverified Main Admin email spoofing
     await assertFails(
       setDoc(doc(spoofAdminDb, 'tasks', 'tsk_spoof'), {
         taskId: 'tsk_spoof',
@@ -199,107 +386,11 @@ export async function runFirestoreRulesAudit(emulatorHost = '127.0.0.1', emulato
       })
     );
 
-    // Dirty Dozen #4: Cross-member wallet read & unfiltered submission list
-    await assertFails(getDoc(doc(member1Db, 'wallets', 'member_2')));
-    await assertFails(getDocs(collection(member1Db, 'submissions')));
-    await assertSucceeds(getDocs(query(collection(member1Db, 'submissions'), where('userId', '==', 'member_1'))));
-
-    // Dirty Dozen #5: Self-minting wallet balance
-    await assertFails(
-      updateDoc(doc(member1Db, 'wallets', 'member_1'), {
-        availableBalance: 50000,
-        updatedAt: serverTimestamp(),
-      })
-    );
-
-    // Dirty Dozen #6: Fake task reward transaction creation
-    await assertFails(
-      setDoc(doc(member1Db, 'transactions', 'tx_fake'), {
-        transactionId: 'tx_fake',
-        userId: 'member_1',
-        memberId: 'MTS-100001',
-        type: 'task_reward',
-        amount: 500,
-        feeAmount: 0,
-        netAmount: 500,
-        direction: 'credit',
-        description: 'Fake reward',
-        referenceId: 'sub_done',
-        createdAt: serverTimestamp(),
-      })
-    );
-
-    // Dirty Dozen #7: Pending member attempting task submission
-    await assertFails(
-      setDoc(doc(pendingDb, 'submissions', 'sub_pending'), {
-        submissionId: 'sub_pending',
-        taskId: 'tsk_1',
-        taskCode: 'TSK-10001',
-        taskTitle: 'Official Channel Subscription',
-        rewardAmount: 20,
-        userId: 'pending_1',
-        memberId: 'MTS-100002',
-        memberName: 'Pending Member',
-        screenshotAssetId: 'asset_m1',
-        submissionNote: '',
-        status: 'pending',
-        rejectionReason: '',
-        reviewedBy: '',
-        reviewedAt: '',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      })
-    );
-
-    // Dirty Dozen #8: Spoofed task reward amount or unsafe proofLink scheme
-    await assertFails(
-      setDoc(doc(member1Db, 'submissions', 'sub_tamper'), {
-        submissionId: 'sub_tamper',
-        taskId: 'tsk_1',
-        taskCode: 'TSK-10001',
-        taskTitle: 'Official Channel Subscription',
-        rewardAmount: 5000,
-        userId: 'member_1',
-        memberId: 'MTS-100001',
-        memberName: 'Approved Member One',
-        screenshotAssetId: 'asset_m1',
-        proofLink: 'https://example.com/proof',
-        submissionNote: '',
-        status: 'pending',
-        rejectionReason: '',
-        reviewedBy: '',
-        reviewedAt: '',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      })
-    );
-    await assertFails(
-      setDoc(doc(member1Db, 'submissions', 'sub_bad_link'), {
-        submissionId: 'sub_bad_link',
-        taskId: 'tsk_1',
-        taskCode: 'TSK-10001',
-        taskTitle: 'Official Channel Subscription',
-        rewardAmount: 20,
-        userId: 'member_1',
-        memberId: 'MTS-100001',
-        memberName: 'Approved Member One',
-        screenshotAssetId: 'asset_m1',
-        proofLink: 'javascript:evil()',
-        submissionNote: '',
-        status: 'pending',
-        rejectionReason: '',
-        reviewedBy: '',
-        reviewedAt: '',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      })
-    );
-
-    // Dirty Dozen #9: Sub-minimum withdrawal (< 100 BDT)
+    // Dirty Dozen #11: Sub-minimum withdrawal (< 100 BDT)
     await assertFails(
       setDoc(doc(member1Db, 'withdrawals', 'wdr_low'), {
         withdrawalId: 'wdr_low',
-        transactionCode: 'WDR-100001',
+        transactionCode: 'WDR-100009',
         userId: 'member_1',
         memberId: 'MTS-100001',
         memberName: 'Approved Member One',
@@ -318,59 +409,71 @@ export async function runFirestoreRulesAudit(emulatorHost = '127.0.0.1', emulato
       })
     );
 
-    // Dirty Dozen #10: Orphaned withdrawal without atomic wallet deduction
+    // Dirty Dozen #12: Shadow field injection on profile update
     await assertFails(
-      setDoc(doc(member1Db, 'withdrawals', 'wdr_orphan'), {
-        withdrawalId: 'wdr_orphan',
-        transactionCode: 'WDR-100002',
-        userId: 'member_1',
-        memberId: 'MTS-100001',
-        memberName: 'Approved Member One',
-        payoutMethod: 'bKash',
-        accountNumber: '01712345678',
-        grossAmount: 100,
-        feeAmount: 5,
-        netAmount: 95,
-        status: 'pending',
-        adminNote: '',
-        paymentReference: '',
-        processedBy: '',
-        processedAt: '',
-        createdAt: serverTimestamp(),
+      updateDoc(doc(member1Db, 'users', 'member_1'), {
+        fullName: 'Updated Name',
+        isSuperAdmin: true,
         updatedAt: serverTimestamp(),
       })
     );
 
-    // Dirty Dozen #11: Double approval of terminal submission
-    await assertFails(
-      updateDoc(doc(realAdminDb, 'submissions', 'sub_done'), {
-        status: 'approved',
-        rejectionReason: '',
-        reviewedBy: 'admin_1',
-        reviewedAt: new Date().toISOString(),
+    // Positive Assertion A: Assistant Admin can inspect & recommend on custom task without crediting wallet
+    await assertSucceeds(
+      updateDoc(doc(assistantDb, 'customTasks', 'ctk_pending_1'), {
+        assistantStatus: 'recommended_approve',
+        assistantNote: 'Verified work details and deliverables.',
+        assistantReviewedBy: 'assistant_1',
+        assistantReviewerId: 'MTS-900001',
+        assistantReviewerName: 'Assistant Reviewer One',
+        assistantReviewedAt: new Date().toISOString(),
         updatedAt: serverTimestamp(),
       })
     );
 
-    // Dirty Dozen #12: Plaintext password injection in passwordChangeRequests
-    await assertFails(
-      setDoc(doc(member1Db, 'passwordChangeRequests', 'pcr_bad'), {
-        requestId: 'pcr_bad',
-        userId: 'member_1',
-        memberId: 'MTS-100001',
-        memberName: 'Approved Member One',
-        memberEmail: 'm1@example.com',
-        authProvider: 'password',
-        reason: 'Need password update',
-        newPassword: 'PlaintextPassword123!',
-        status: 'pending',
-        decisionNote: '',
-        reviewedBy: '',
-        reviewedAt: '',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      })
-    );
+    // Positive Assertion B: Assistant Admin atomic single-credit approval on official task submission
+    const assistantBatch = writeBatch(assistantDb);
+    const nowIso = new Date().toISOString();
+    assistantBatch.update(doc(assistantDb, 'submissions', 'sub_pending_1'), {
+      status: 'approved',
+      rejectionReason: '',
+      reviewedBy: 'assistant_1',
+      reviewerId: 'MTS-900001',
+      reviewerName: 'Assistant Reviewer One',
+      reviewerRole: 'assistant_admin',
+      reviewAction: 'approved',
+      reviewedAt: nowIso,
+      updatedAt: serverTimestamp(),
+    });
+    assistantBatch.update(doc(assistantDb, 'wallets', 'member_1'), {
+      availableBalance: 220,
+      totalEarnings: 220,
+      lastCreditedSubmissionId: 'sub_pending_1',
+      updatedAt: serverTimestamp(),
+    });
+    assistantBatch.update(doc(assistantDb, 'users', 'member_1'), {
+      pendingSubmissionsCount: 0,
+      completedTasksCount: 1,
+      totalEarnings: 220,
+      updatedAt: serverTimestamp(),
+    });
+    assistantBatch.set(doc(assistantDb, 'transactions', 'tx_reward_sub_pending_1'), {
+      transactionId: 'tx_reward_sub_pending_1',
+      userId: 'member_1',
+      memberId: 'MTS-100001',
+      type: 'task_reward',
+      amount: 20,
+      feeAmount: 0,
+      netAmount: 20,
+      direction: 'credit',
+      description: 'Task reward credited for TSK-10001',
+      referenceId: 'sub_pending_1',
+      taskName: 'Official Channel Subscription',
+      submissionId: 'sub_pending_1',
+      approvedAt: nowIso,
+      createdAt: serverTimestamp(),
+    });
+    await assertSucceeds(assistantBatch.commit());
   } finally {
     await testEnv.cleanup();
   }

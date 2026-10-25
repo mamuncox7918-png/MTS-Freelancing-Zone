@@ -9,12 +9,14 @@ import {
   Award,
   ClipboardList,
   FileCheck2,
+  FilePlus2,
   Home,
   KeyRound,
   Layers,
   LogOut,
   Send,
   ShieldCheck,
+  UserCheck,
   UserCircle2,
   Users,
   Wallet,
@@ -37,6 +39,7 @@ import {
 } from './components/AuthViews';
 import {
   CompletedTasksView,
+  CustomTaskSubmissionView,
   MemberDashboardView,
   MemberProfileView,
   MemberTasksView,
@@ -45,9 +48,12 @@ import {
   ProofSubmissionsView,
 } from './components/MemberViews';
 import { AdminPanel, AdminTab } from './components/AdminPanel';
+import { AssistantAdminPanel, AssistantAdminTab } from './components/AssistantAdminPanel';
 import { AvatarDisplay } from './components/MediaView';
 import { OfflineIndicator, PWAInstallButton } from './components/PWAInstallPrompt';
 import {
+  CustomTaskSubmission,
+  MemberNotification,
   MemberPageTab,
   PasswordChangeRequest,
   TaskItem,
@@ -128,8 +134,10 @@ function AdminOnlyWorkspace({
   }[] = [
     { id: 'overview', label: 'Overview', icon: ShieldCheck },
     { id: 'members', label: 'Members', icon: Users },
+    { id: 'assistants', label: 'Assistant Admins', icon: UserCheck },
     { id: 'tasks', label: 'Manage Tasks', icon: Layers },
     { id: 'submissions', label: 'Proof Reviews', icon: FileCheck2 },
+    { id: 'custom_tasks', label: 'Custom Tasks', icon: FilePlus2 },
     { id: 'completed', label: 'Completed Tasks', icon: Award },
     { id: 'withdrawals', label: 'Withdrawals', icon: Send },
     { id: 'ledger', label: 'Wallet Ledger', icon: Wallet },
@@ -144,8 +152,8 @@ function AdminOnlyWorkspace({
   }[] = [
     { id: 'overview', label: 'Overview', icon: ShieldCheck },
     { id: 'members', label: 'Members', icon: Users },
-    { id: 'tasks', label: 'Tasks', icon: Layers },
     { id: 'submissions', label: 'Proofs', icon: FileCheck2 },
+    { id: 'custom_tasks', label: 'Custom', icon: FilePlus2 },
     { id: 'withdrawals', label: 'Payouts', icon: Send },
   ];
 
@@ -245,12 +253,166 @@ function AdminOnlyWorkspace({
         {adminBottomTabs.map((tab) => {
           const Icon = tab.icon;
           const isActive =
-            adminTab === tab.id || (tab.id === 'tasks' && adminTab === 'completed');
+            adminTab === tab.id ||
+            (tab.id === 'overview' && (adminTab === 'tasks' || adminTab === 'assistants'));
           return (
             <button
               key={tab.id}
               type="button"
               onClick={() => setAdminTab(tab.id)}
+              className={`min-h-[48px] flex flex-col items-center justify-center transition-colors ${
+                isActive ? 'text-teal-300' : 'text-sky-200/65 hover:text-white'
+              }`}
+            >
+              <Icon className="w-5 h-5" />
+              <span className="text-[10px] font-medium tracking-tight mt-0.5 whitespace-nowrap">
+                {tab.label}
+              </span>
+            </button>
+          );
+        })}
+      </nav>
+    </div>
+  );
+}
+
+function AssistantAdminWorkspace({
+  profile,
+  onLogout,
+}: {
+  profile: UserProfile;
+  onLogout: () => Promise<void>;
+}) {
+  const [assistantTab, setAssistantTab] = useState<AssistantAdminTab>('overview');
+
+  const assistantSidebarLinks: {
+    id: AssistantAdminTab;
+    label: string;
+    icon: React.ComponentType<{ className?: string }>;
+  }[] = [
+    { id: 'overview', label: 'Overview', icon: UserCheck },
+    { id: 'submissions', label: 'Official Proofs', icon: FileCheck2 },
+    { id: 'custom_tasks', label: 'Custom Tasks', icon: FilePlus2 },
+    { id: 'completed', label: 'Completed Tasks', icon: Award },
+    { id: 'profile', label: 'Assistant Profile', icon: UserCircle2 },
+  ];
+
+  const assistantBottomTabs: {
+    id: AssistantAdminTab;
+    label: string;
+    icon: React.ComponentType<{ className?: string }>;
+  }[] = [
+    { id: 'overview', label: 'Overview', icon: UserCheck },
+    { id: 'submissions', label: 'Proofs', icon: FileCheck2 },
+    { id: 'custom_tasks', label: 'Custom', icon: FilePlus2 },
+    { id: 'completed', label: 'Completed', icon: Award },
+    { id: 'profile', label: 'Profile', icon: UserCircle2 },
+  ];
+
+  return (
+    <div className="min-h-dvh flex flex-col lg:flex-row">
+      {/* Desktop Assistant Admin Sidebar */}
+      <aside className="hidden lg:flex lg:flex-col lg:w-64 lg:shrink-0 bg-[#081024]/95 border-r border-white/10 p-5 justify-between sticky top-0 h-dvh">
+        <div className="space-y-6 overflow-y-auto">
+          <BrandWordmark size="sm" />
+
+          <nav className="space-y-1" aria-label="Assistant Admin sections">
+            {assistantSidebarLinks.map((item) => {
+              const Icon = item.icon;
+              const active = assistantTab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setAssistantTab(item.id)}
+                  className={`w-full min-h-[42px] px-3.5 rounded-xl flex items-center gap-3 text-sm font-medium transition-colors whitespace-nowrap ${
+                    active
+                      ? 'bg-teal-500 text-slate-950 font-semibold'
+                      : 'text-sky-200/75 hover:text-white hover:bg-white/6'
+                  }`}
+                >
+                  <Icon className="w-4 h-4 shrink-0" />
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+
+          <PWAInstallButton />
+        </div>
+
+        <div className="pt-3 border-t border-white/10 space-y-2.5">
+          <div className="flex items-center gap-3 px-1">
+            <AvatarDisplay
+              photoAssetId={profile.photoAssetId}
+              fullName={profile.fullName}
+              sizeClass="w-9 h-9 text-xs"
+            />
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-semibold text-white truncate">{profile.fullName}</p>
+              <p className="text-[11px] text-teal-300 truncate">
+                Assistant Admin · {profile.memberId}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => void onLogout()}
+            className="w-full min-h-[40px] px-3.5 rounded-xl bg-white/[0.05] hover:bg-rose-500/15 border border-white/10 text-xs font-semibold text-sky-100 hover:text-rose-200 flex items-center justify-center gap-2 transition-colors"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Sign Out</span>
+          </button>
+        </div>
+      </aside>
+
+      {/* Mobile Assistant Admin Top Bar */}
+      <header className="lg:hidden sticky top-0 z-30 h-12 px-4 bg-[#070E20]/90 backdrop-blur-md border-b border-white/10 flex items-center justify-between gap-3">
+        <button
+          type="button"
+          onClick={() => setAssistantTab('overview')}
+          className="text-sm font-bold tracking-tight text-white whitespace-nowrap shrink-0 flex items-center gap-2"
+        >
+          <BrandLogoMark className="w-7 h-7 rounded-full text-[10px]" />
+          <span>Assistant Admin</span>
+        </button>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <PWAInstallButton compact />
+          <button
+            type="button"
+            onClick={() => void onLogout()}
+            className="min-h-[38px] px-3 rounded-lg bg-white/[0.06] hover:bg-rose-500/20 border border-white/10 text-xs font-semibold text-sky-100 inline-flex items-center gap-1.5 whitespace-nowrap"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Sign Out</span>
+          </button>
+        </div>
+      </header>
+
+      {/* Dedicated Assistant Admin Main Content */}
+      <main className="flex-1 w-full max-w-6xl mx-auto px-4 py-5 sm:px-6 lg:px-8 lg:py-8 pb-24 lg:pb-10">
+        <AssistantAdminPanel
+          currentAssistant={profile}
+          activeTab={assistantTab}
+          onTabChange={setAssistantTab}
+          onLogout={onLogout}
+        />
+      </main>
+
+      {/* Mobile Assistant Admin Bottom Navigation */}
+      <nav
+        aria-label="Assistant Admin mobile navigation"
+        className="lg:hidden fixed bottom-0 left-0 right-0 z-40 h-14 bg-[#070E20]/95 backdrop-blur-md border-t border-white/10 grid grid-cols-5 items-center px-1"
+      >
+        {assistantBottomTabs.map((tab) => {
+          const Icon = tab.icon;
+          const isActive = assistantTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setAssistantTab(tab.id)}
               className={`min-h-[48px] flex flex-col items-center justify-center transition-colors ${
                 isActive ? 'text-teal-300' : 'text-sky-200/65 hover:text-white'
               }`}
@@ -280,6 +442,8 @@ function MemberOnlyWorkspace({
 
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [submissions, setSubmissions] = useState<TaskSubmission[]>([]);
+  const [customTasks, setCustomTasks] = useState<CustomTaskSubmission[]>([]);
+  const [notifications, setNotifications] = useState<MemberNotification[]>([]);
   const [transactions, setTransactions] = useState<WalletTransaction[]>([]);
   const [withdrawals, setWithdrawals] = useState<WithdrawalRequest[]>([]);
   const [passwordRequests, setPasswordRequests] = useState<PasswordChangeRequest[]>([]);
@@ -307,6 +471,24 @@ function MemberOnlyWorkspace({
           setSubmissions(list);
         },
         (err) => handleFirestoreError(err, OperationType.LIST, 'submissions')
+      ),
+      onSnapshot(
+        query(collection(db, 'customTasks'), where('userId', '==', uid)),
+        (snap) => {
+          const list = snap.docs.map((d) => d.data() as CustomTaskSubmission);
+          list.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+          setCustomTasks(list);
+        },
+        (err) => handleFirestoreError(err, OperationType.LIST, 'customTasks')
+      ),
+      onSnapshot(
+        query(collection(db, 'notifications'), where('userId', '==', uid)),
+        (snap) => {
+          const list = snap.docs.map((d) => d.data() as MemberNotification);
+          list.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+          setNotifications(list);
+        },
+        (err) => handleFirestoreError(err, OperationType.LIST, 'notifications')
       ),
       onSnapshot(
         query(collection(db, 'transactions'), where('userId', '==', uid)),
@@ -347,6 +529,7 @@ function MemberOnlyWorkspace({
   }[] = [
     { id: 'home', label: 'Dashboard', icon: Home },
     { id: 'tasks', label: 'Available Tasks', icon: Layers },
+    { id: 'custom_task', label: 'Custom Task Submission', icon: FilePlus2 },
     { id: 'completed', label: 'Completed Tasks', icon: Award },
     { id: 'proof', label: 'Proof Submissions', icon: FileCheck2 },
     { id: 'wallet', label: 'Wallet & Earnings', icon: Wallet },
@@ -449,6 +632,11 @@ function MemberOnlyWorkspace({
       <main className="flex-1 w-full max-w-6xl mx-auto px-4 py-5 sm:px-6 lg:px-8 lg:py-8 pb-24 lg:pb-10">
         {activeTab === 'tasks' ? (
           <MemberTasksView tasks={tasks} submissions={submissions} onNavigate={setActiveTab} />
+        ) : activeTab === 'custom_task' ? (
+          <CustomTaskSubmissionView
+            customTasks={customTasks}
+            notifications={notifications}
+          />
         ) : activeTab === 'completed' ? (
           <CompletedTasksView submissions={submissions} onNavigate={setActiveTab} />
         ) : activeTab === 'proof' ? (
@@ -479,6 +667,8 @@ function MemberOnlyWorkspace({
             wallet={wallet}
             tasks={tasks}
             submissions={submissions}
+            customTasks={customTasks}
+            notifications={notifications}
             transactions={transactions}
             withdrawals={withdrawals}
             passwordRequests={passwordRequests}
@@ -495,7 +685,8 @@ function MemberOnlyWorkspace({
         {mobileBottomTabs.map((tab) => {
           const Icon = tab.icon;
           const isActive =
-            activeTab === tab.id || (tab.id === 'tasks' && activeTab === 'completed');
+            activeTab === tab.id ||
+            (tab.id === 'tasks' && (activeTab === 'completed' || activeTab === 'custom_task'));
           return (
             <button
               key={tab.id}
@@ -523,6 +714,10 @@ function AuthenticatedWorkspace() {
 
   if (profile.role === 'admin') {
     return <AdminOnlyWorkspace profile={profile} onLogout={logout} />;
+  }
+
+  if (profile.role === 'assistant_admin') {
+    return <AssistantAdminWorkspace profile={profile} onLogout={logout} />;
   }
 
   return <MemberOnlyWorkspace profile={profile} wallet={wallet} onLogout={logout} />;

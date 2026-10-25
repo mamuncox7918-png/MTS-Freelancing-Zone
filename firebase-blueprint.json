@@ -2,12 +2,12 @@
   "entities": {
     "AdminRecord": {
       "title": "AdminRecord",
-      "description": "Trusted administrator membership record used for RBAC verification.",
+      "description": "Trusted Main Administrator membership record used for full RBAC verification.",
       "type": "object",
       "properties": {
         "uid": {
           "type": "string",
-          "description": "Firebase Auth UID of the administrator.",
+          "description": "Firebase Auth UID of the Main Administrator.",
           "minLength": 1,
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
@@ -27,9 +27,55 @@
       },
       "required": ["uid", "email", "createdAt"]
     },
+    "AssistantAdminRecord": {
+      "title": "AssistantAdminRecord",
+      "description": "Trusted Assistant Admin RBAC record managed exclusively by the Main Admin.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the Assistant Admin.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "memberId": {
+          "type": "string",
+          "description": "Unique human-readable staff ID.",
+          "minLength": 6,
+          "maxLength": 20
+        },
+        "fullName": {
+          "type": "string",
+          "description": "Display name of the Assistant Admin.",
+          "minLength": 2,
+          "maxLength": 300
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Login email address of the Assistant Admin.",
+          "minLength": 3,
+          "maxLength": 150
+        },
+        "createdBy": {
+          "type": "string",
+          "description": "UID of the Main Admin who provisioned this Assistant Admin.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when Assistant Admin access was granted."
+        }
+      },
+      "required": ["uid", "memberId", "fullName", "email", "createdBy", "createdAt"]
+    },
     "UserProfile": {
       "title": "UserProfile",
-      "description": "Member or Admin account profile including approval status and summary counters.",
+      "description": "Member, Assistant Admin, or Main Admin account profile including approval status and summary counters.",
       "type": "object",
       "properties": {
         "uid": {
@@ -48,14 +94,14 @@
         },
         "fullName": {
           "type": "string",
-          "description": "Full display name of the member.",
+          "description": "Full display name of the user.",
           "minLength": 2,
           "maxLength": 300
         },
         "email": {
           "type": "string",
           "format": "email",
-          "description": "Primary verified email address.",
+          "description": "Primary email address.",
           "minLength": 3,
           "maxLength": 150
         },
@@ -78,8 +124,8 @@
         "role": {
           "type": "string",
           "description": "System role.",
-          "enum": ["member", "admin"],
-          "maxLength": 10
+          "enum": ["member", "assistant_admin", "admin"],
+          "maxLength": 20
         },
         "status": {
           "type": "string",
@@ -89,16 +135,16 @@
         },
         "rejectionReason": {
           "type": "string",
-          "description": "Reason provided by Admin if registration was rejected.",
+          "description": "Reason provided by Admin if registration or role access was rejected.",
           "maxLength": 1000
         },
         "completedTasksCount": {
           "type": "number",
-          "description": "Count of Admin-approved task submissions."
+          "description": "Count of approved task submissions."
         },
         "pendingSubmissionsCount": {
           "type": "number",
-          "description": "Count of proof submissions currently awaiting review."
+          "description": "Count of official proof submissions currently awaiting review."
         },
         "totalEarnings": {
           "type": "number",
@@ -149,7 +195,7 @@
         },
         "ownerId": {
           "type": "string",
-          "description": "UID of the member who uploaded the image.",
+          "description": "UID of the user who uploaded the image.",
           "minLength": 1,
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
@@ -186,7 +232,7 @@
     },
     "TaskItem": {
       "title": "TaskItem",
-      "description": "Freelancing micro-task created and managed by Admin.",
+      "description": "Official freelancing micro-task created and managed exclusively by Main Admin.",
       "type": "object",
       "properties": {
         "taskId": {
@@ -223,7 +269,7 @@
         },
         "rewardAmount": {
           "type": "number",
-          "description": "Reward credited upon Admin approval in Bangladeshi Taka (BDT)."
+          "description": "Reward credited upon approval in Bangladeshi Taka (BDT)."
         },
         "isActive": {
           "type": "boolean",
@@ -231,7 +277,7 @@
         },
         "createdBy": {
           "type": "string",
-          "description": "Admin UID who created the task.",
+          "description": "Main Admin UID who created the task.",
           "minLength": 1,
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
@@ -262,7 +308,7 @@
     },
     "TaskSubmission": {
       "title": "TaskSubmission",
-      "description": "Proof screenshot submission by an approved member for an active task.",
+      "description": "Proof screenshot submission by an approved member for an official task.",
       "type": "object",
       "properties": {
         "submissionId": {
@@ -339,17 +385,39 @@
         },
         "rejectionReason": {
           "type": "string",
-          "description": "Explanation provided by Admin when rejecting a submission.",
+          "description": "Required explanation provided when rejecting a submission.",
           "maxLength": 1000
         },
         "reviewedBy": {
           "type": "string",
-          "description": "Admin UID who reviewed the submission.",
+          "description": "Reviewer UID (Main Admin or Assistant Admin) who reviewed the submission.",
           "maxLength": 128
+        },
+        "reviewerId": {
+          "type": "string",
+          "description": "Human-readable ID of the reviewer.",
+          "maxLength": 30
+        },
+        "reviewerName": {
+          "type": "string",
+          "description": "Display name of the reviewer.",
+          "maxLength": 300
+        },
+        "reviewerRole": {
+          "type": "string",
+          "description": "Role of the reviewer.",
+          "enum": ["", "admin", "assistant_admin"],
+          "maxLength": 20
+        },
+        "reviewAction": {
+          "type": "string",
+          "description": "Recorded review decision action.",
+          "enum": ["", "approved", "rejected"],
+          "maxLength": 15
         },
         "reviewedAt": {
           "type": "string",
-          "description": "ISO timestamp when Admin completed review.",
+          "description": "ISO timestamp when reviewer completed review.",
           "maxLength": 40
         },
         "createdAt": {
@@ -377,6 +445,251 @@
         "rejectionReason",
         "reviewedBy",
         "reviewedAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CustomTaskSubmission": {
+      "title": "CustomTaskSubmission",
+      "description": "Custom work submission outside the official task list with requested BDT amount, Assistant Admin pre-review, and Main Admin final payment approval.",
+      "type": "object",
+      "properties": {
+        "customTaskId": {
+          "type": "string",
+          "description": "Unique custom task submission ID.",
+          "minLength": 4,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "customTaskCode": {
+          "type": "string",
+          "description": "Human-readable custom task reference code.",
+          "minLength": 6,
+          "maxLength": 20,
+          "pattern": "^CTK-[0-9]{5}$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Submitting member UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "memberId": {
+          "type": "string",
+          "description": "Submitting member human-readable ID.",
+          "minLength": 6,
+          "maxLength": 20
+        },
+        "memberName": {
+          "type": "string",
+          "description": "Submitting member full name.",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "taskName": {
+          "type": "string",
+          "description": "Name/title of the custom work completed.",
+          "minLength": 2,
+          "maxLength": 400
+        },
+        "taskDetails": {
+          "type": "string",
+          "description": "Detailed multiline description of the completed work.",
+          "minLength": 5,
+          "maxLength": 5000
+        },
+        "requestedAmount": {
+          "type": "number",
+          "description": "Payment amount requested by the member in BDT."
+        },
+        "approvedAmount": {
+          "type": "number",
+          "description": "Final payment amount approved by Main Admin in BDT (0 until approved)."
+        },
+        "screenshotAssetId": {
+          "type": "string",
+          "description": "Optional MediaAsset ID for uploaded proof screenshot, or empty string.",
+          "maxLength": 128
+        },
+        "status": {
+          "type": "string",
+          "description": "Final payment decision status controlled exclusively by Main Admin.",
+          "enum": ["pending", "approved", "rejected"],
+          "maxLength": 15
+        },
+        "assistantStatus": {
+          "type": "string",
+          "description": "Inspection/recommendation state set by Assistant Admin.",
+          "enum": ["unreviewed", "reviewed", "recommended_approve", "recommended_reject"],
+          "maxLength": 25
+        },
+        "assistantNote": {
+          "type": "string",
+          "description": "Note recorded by Assistant Admin during inspection.",
+          "maxLength": 1000
+        },
+        "assistantReviewedBy": {
+          "type": "string",
+          "description": "UID of the Assistant Admin who inspected the request.",
+          "maxLength": 128
+        },
+        "assistantReviewerId": {
+          "type": "string",
+          "description": "Human-readable ID of the inspecting Assistant Admin.",
+          "maxLength": 30
+        },
+        "assistantReviewerName": {
+          "type": "string",
+          "description": "Name of the inspecting Assistant Admin.",
+          "maxLength": 300
+        },
+        "assistantReviewedAt": {
+          "type": "string",
+          "description": "ISO timestamp of Assistant Admin inspection.",
+          "maxLength": 40
+        },
+        "rejectionReason": {
+          "type": "string",
+          "description": "Required rejection reason provided by Main Admin when rejecting.",
+          "maxLength": 1000
+        },
+        "reviewedBy": {
+          "type": "string",
+          "description": "Main Admin UID who made the final payment decision.",
+          "maxLength": 128
+        },
+        "reviewerId": {
+          "type": "string",
+          "description": "Human-readable ID of the deciding Main Admin.",
+          "maxLength": 30
+        },
+        "reviewerName": {
+          "type": "string",
+          "description": "Display name of the deciding Main Admin.",
+          "maxLength": 300
+        },
+        "reviewedAt": {
+          "type": "string",
+          "description": "ISO timestamp of Main Admin final payment decision.",
+          "maxLength": 40
+        },
+        "transactionId": {
+          "type": "string",
+          "description": "Deterministic ledger transaction ID credited on Main Admin approval, or empty string.",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Custom task submission timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last modification timestamp."
+        }
+      },
+      "required": [
+        "customTaskId",
+        "customTaskCode",
+        "userId",
+        "memberId",
+        "memberName",
+        "taskName",
+        "taskDetails",
+        "requestedAmount",
+        "approvedAmount",
+        "screenshotAssetId",
+        "status",
+        "assistantStatus",
+        "assistantNote",
+        "assistantReviewedBy",
+        "assistantReviewerId",
+        "assistantReviewerName",
+        "assistantReviewedAt",
+        "rejectionReason",
+        "reviewedBy",
+        "reviewerId",
+        "reviewerName",
+        "reviewedAt",
+        "transactionId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "MemberNotification": {
+      "title": "MemberNotification",
+      "description": "In-app notification delivered to a member when custom or official task decisions occur.",
+      "type": "object",
+      "properties": {
+        "notificationId": {
+          "type": "string",
+          "description": "Unique notification ID.",
+          "minLength": 4,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Recipient member UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "type": {
+          "type": "string",
+          "description": "Notification event category.",
+          "enum": [
+            "custom_task_approved",
+            "custom_task_rejected",
+            "task_approved",
+            "task_rejected"
+          ],
+          "maxLength": 30
+        },
+        "title": {
+          "type": "string",
+          "description": "Short notification headline.",
+          "minLength": 3,
+          "maxLength": 200
+        },
+        "message": {
+          "type": "string",
+          "description": "Detailed decision notification body.",
+          "minLength": 3,
+          "maxLength": 1000
+        },
+        "referenceId": {
+          "type": "string",
+          "description": "Related customTaskId or submissionId.",
+          "minLength": 2,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "isRead": {
+          "type": "boolean",
+          "description": "Whether the member has dismissed/read the notification."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Notification creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Notification read-status update timestamp."
+        }
+      },
+      "required": [
+        "notificationId",
+        "userId",
+        "type",
+        "title",
+        "message",
+        "referenceId",
+        "isRead",
         "createdAt",
         "updatedAt"
       ]
@@ -424,6 +737,11 @@
           "description": "Most recent withdrawal ID used for atomic deduction verification.",
           "maxLength": 128
         },
+        "lastCreditedSubmissionId": {
+          "type": "string",
+          "description": "Most recent official submission ID used to verify Assistant Admin single-credit invariant.",
+          "maxLength": 128
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
@@ -447,12 +765,12 @@
     },
     "WalletTransaction": {
       "title": "WalletTransaction",
-      "description": "Immutable financial ledger record for rewards, withdrawals, fees, payments, and refunds.",
+      "description": "Immutable financial ledger record for official task rewards, custom task payments, withdrawals, fees, payouts, and refunds.",
       "type": "object",
       "properties": {
         "transactionId": {
           "type": "string",
-          "description": "Unique transaction ID.",
+          "description": "Unique transaction ID (deterministic for task/custom rewards to guarantee zero duplicates).",
           "minLength": 4,
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
@@ -473,7 +791,13 @@
         "type": {
           "type": "string",
           "description": "Ledger transaction classification.",
-          "enum": ["task_reward", "withdrawal_request", "withdrawal_paid", "withdrawal_refund"],
+          "enum": [
+            "task_reward",
+            "custom_task_reward",
+            "withdrawal_request",
+            "withdrawal_paid",
+            "withdrawal_refund"
+          ],
           "maxLength": 30
         },
         "amount": {
@@ -502,10 +826,25 @@
         },
         "referenceId": {
           "type": "string",
-          "description": "Associated submissionId or withdrawalId.",
+          "description": "Associated submissionId, customTaskId, or withdrawalId.",
           "minLength": 2,
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "taskName": {
+          "type": "string",
+          "description": "Task name recorded on task_reward and custom_task_reward entries.",
+          "maxLength": 400
+        },
+        "submissionId": {
+          "type": "string",
+          "description": "Explicit submissionId or customTaskId recorded on reward credits.",
+          "maxLength": 128
+        },
+        "approvedAt": {
+          "type": "string",
+          "description": "ISO approval timestamp recorded on reward credits.",
+          "maxLength": 40
         },
         "createdAt": {
           "type": "string",
@@ -608,7 +947,7 @@
         },
         "processedBy": {
           "type": "string",
-          "description": "Admin UID who processed the withdrawal.",
+          "description": "Main Admin UID who processed the withdrawal.",
           "maxLength": 128
         },
         "processedAt": {
@@ -705,17 +1044,17 @@
         },
         "decisionNote": {
           "type": "string",
-          "description": "Admin approval or rejection note.",
+          "description": "Main Admin approval or rejection note.",
           "maxLength": 1000
         },
         "reviewedBy": {
           "type": "string",
-          "description": "Admin UID who decided on the request.",
+          "description": "Main Admin UID who decided on the request.",
           "maxLength": 128
         },
         "reviewedAt": {
           "type": "string",
-          "description": "ISO timestamp of Admin decision.",
+          "description": "ISO timestamp of Main Admin decision.",
           "maxLength": 40
         },
         "createdAt": {
@@ -747,7 +1086,7 @@
     },
     "AdminAuditLog": {
       "title": "AdminAuditLog",
-      "description": "Immutable administrative audit trail recording all privileged state changes.",
+      "description": "Immutable administrative audit trail recording all privileged Main Admin and Assistant Admin actions.",
       "type": "object",
       "properties": {
         "logId": {
@@ -759,7 +1098,7 @@
         },
         "adminUid": {
           "type": "string",
-          "description": "UID of the acting Admin.",
+          "description": "UID of the acting Main Admin or Assistant Admin.",
           "minLength": 1,
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
@@ -767,13 +1106,13 @@
         "adminEmail": {
           "type": "string",
           "format": "email",
-          "description": "Email of the acting Admin.",
+          "description": "Email of the acting Main Admin or Assistant Admin.",
           "minLength": 3,
           "maxLength": 150
         },
         "action": {
           "type": "string",
-          "description": "Action code (e.g., MEMBER_APPROVED, SUBMISSION_APPROVED, WITHDRAWAL_PAID).",
+          "description": "Action code (e.g., MEMBER_APPROVED, SUBMISSION_APPROVED, CUSTOM_TASK_APPROVED).",
           "minLength": 3,
           "maxLength": 80
         },
@@ -807,11 +1146,15 @@
   "firestore": {
     "/admins/{adminId}": {
       "schema": { "$ref": "#/entities/AdminRecord" },
-      "description": "Authoritative RBAC administrator registry."
+      "description": "Authoritative RBAC Main Administrator registry."
+    },
+    "/assistantAdmins/{assistantId}": {
+      "schema": { "$ref": "#/entities/AssistantAdminRecord" },
+      "description": "Authoritative RBAC Assistant Admin registry managed exclusively by Main Admin."
     },
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
-      "description": "Private member and admin profiles with registration approval states."
+      "description": "Private member, assistant admin, and main admin profiles with registration approval states."
     },
     "/mediaAssets/{assetId}": {
       "schema": { "$ref": "#/entities/MediaAsset" },
@@ -819,11 +1162,19 @@
     },
     "/tasks/{taskId}": {
       "schema": { "$ref": "#/entities/TaskItem" },
-      "description": "Admin-managed freelancing tasks with BDT reward amounts."
+      "description": "Main Admin-managed official freelancing tasks with predefined BDT reward amounts."
     },
     "/submissions/{submissionId}": {
       "schema": { "$ref": "#/entities/TaskSubmission" },
-      "description": "Member proof screenshot submissions and Admin review outcomes."
+      "description": "Member proof screenshot submissions for official tasks and Admin/Assistant Admin review outcomes."
+    },
+    "/customTasks/{customTaskId}": {
+      "schema": { "$ref": "#/entities/CustomTaskSubmission" },
+      "description": "Member custom task requests with Assistant Admin pre-review and Main Admin final payment approval."
+    },
+    "/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/MemberNotification" },
+      "description": "Member decision notifications for custom and official task reviews."
     },
     "/wallets/{userId}": {
       "schema": { "$ref": "#/entities/MemberWallet" },
@@ -831,7 +1182,7 @@
     },
     "/transactions/{transactionId}": {
       "schema": { "$ref": "#/entities/WalletTransaction" },
-      "description": "Immutable ledger history of rewards, withdrawal deductions, payouts, and refunds."
+      "description": "Immutable ledger history of official rewards, custom task rewards, withdrawal deductions, payouts, and refunds."
     },
     "/withdrawals/{withdrawalId}": {
       "schema": { "$ref": "#/entities/WithdrawalRequest" },
@@ -839,11 +1190,11 @@
     },
     "/passwordChangeRequests/{requestId}": {
       "schema": { "$ref": "#/entities/PasswordChangeRequest" },
-      "description": "Admin-reviewed password change authorization requests containing zero password data."
+      "description": "Main Admin-reviewed password change authorization requests containing zero password data."
     },
     "/adminAuditLogs/{logId}": {
       "schema": { "$ref": "#/entities/AdminAuditLog" },
-      "description": "Append-only audit log of all privileged Admin operations."
+      "description": "Append-only audit log of all privileged Main Admin and Assistant Admin operations."
     }
   }
 }
