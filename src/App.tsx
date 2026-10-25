@@ -34,7 +34,6 @@ import {
   BrandLogoMark,
   BrandWordmark,
   CompleteRegistrationScreen,
-  EmailVerificationScreen,
 } from './components/AuthViews';
 import {
   CompletedTasksView,
@@ -547,10 +546,6 @@ function AppGateRouter() {
 
   if (!firebaseUser) {
     return <AuthPortal />;
-  }
-
-  if (!firebaseUser.emailVerified) {
-    return <EmailVerificationScreen />;
   }
 
   if (!profile) {

@@ -1,7 +1,6 @@
 import React, { useRef, useState } from 'react';
 import {
   createUserWithEmailAndPassword,
-  sendEmailVerification,
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signInWithPopup,
@@ -15,8 +14,6 @@ import {
   ExternalLink,
   KeyRound,
   LogOut,
-  MailCheck,
-  RefreshCw,
   ShieldCheck,
   XCircle,
 } from 'lucide-react';
@@ -26,7 +23,12 @@ import {
   FIREBASE_PROJECT_ID,
   BOOTSTRAPPED_ADMIN_EMAIL,
 } from '../lib/firebase';
-import { apiRequest, formatDateTime, uploadCompressedMedia } from '../lib/api';
+import {
+  apiRequest,
+  formatDateTime,
+  setDirectRegistrationActive,
+  uploadCompressedMedia,
+} from '../lib/api';
 import { useAuth } from '../context/AuthContext';
 import { AvatarDisplay, primeMediaCache } from './MediaView';
 import { PWAInstallButton } from './PWAInstallPrompt';
@@ -119,10 +121,22 @@ export function AuthPortal() {
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [needsEmailSetup, setNeedsEmailSetup] = useState(false);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
+  const registerPhotoRef = useRef<HTMLInputElement>(null);
+
+  const handlePickRegisterPhoto = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (photoPreview) URL.revokeObjectURL(photoPreview);
+    setPhotoFile(file);
+    setPhotoPreview(URL.createObjectURL(file));
+    setError(null);
+  };
 
   const handleGoogleAuth = async () => {
     setError(null);
@@ -130,25 +144,25 @@ export function AuthPortal() {
     setNeedsEmailSetup(false);
     setSubmitting(true);
     try {
+      setDirectRegistrationActive(true);
       const cred = await signInWithPopup(auth, googleProvider);
-      if (cred.user.emailVerified) {
-        // Attempt idempotent profile lookup/bootstrap; if brand new member without phone, CompleteRegistrationScreen lets them confirm details
-        if (mode === 'register' && fullName.trim().length >= 2) {
-          await apiRequest('/api/auth/register', {
-            method: 'POST',
-            body: {
-              fullName: fullName.trim().slice(0, MAX_NAME_LENGTH),
-              phone: phone.trim(),
-              authProvider: 'google.com',
-            },
-          });
-        }
+      const autoName = (fullName.trim() || cred.user.displayName || '').trim().slice(0, MAX_NAME_LENGTH);
+      if (autoName.length >= 2) {
+        await apiRequest('/api/auth/register', {
+          method: 'POST',
+          body: {
+            fullName: autoName,
+            phone: phone.trim(),
+            authProvider: 'google.com',
+          },
+        });
       }
     } catch (err) {
       const mapped = mapFirebaseAuthError(err);
       setError(mapped.message);
       setNeedsEmailSetup(Boolean(mapped.needsEmailProviderSetup));
     } finally {
+      setDirectRegistrationActive(false);
       setSubmitting(false);
     }
   };
@@ -181,7 +195,7 @@ export function AuthPortal() {
     }
 
     if (mode === 'register') {
-      const cleanName = fullName.trim();
+      const cleanName = fullName.trim().slice(0, MAX_NAME_LENGTH);
       const cleanPhone = phone.trim();
       if (cleanName.length < 2) {
         setError('Enter your full name (at least 2 characters).');
@@ -197,27 +211,39 @@ export function AuthPortal() {
       }
 
       setSubmitting(true);
+      setDirectRegistrationActive(true);
       try {
         pendingDraftRegistration = { fullName: cleanName, phone: cleanPhone };
         const cred = await createUserWithEmailAndPassword(auth, trimmedEmail, password);
         await updateProfile(cred.user, { displayName: cleanName });
-        if (!cred.user.emailVerified) {
-          await sendEmailVerification(cred.user);
-        } else {
-          await apiRequest('/api/auth/register', {
-            method: 'POST',
+        await apiRequest('/api/auth/register', {
+          method: 'POST',
+          body: {
+            fullName: cleanName,
+            phone: cleanPhone,
+            authProvider: 'password',
+          },
+        });
+
+        if (photoFile) {
+          const uploaded = await uploadCompressedMedia(photoFile, 'avatar');
+          primeMediaCache(uploaded.assetId, uploaded.previewDataUrl);
+          await apiRequest('/api/profile', {
+            method: 'PUT',
             body: {
               fullName: cleanName,
               phone: cleanPhone,
-              authProvider: 'password',
+              photoAssetId: uploaded.assetId,
             },
           });
         }
+        pendingDraftRegistration = null;
       } catch (err) {
         const mapped = mapFirebaseAuthError(err);
         setError(mapped.message);
         setNeedsEmailSetup(Boolean(mapped.needsEmailProviderSetup));
       } finally {
+        setDirectRegistrationActive(false);
         setSubmitting(false);
       }
       return;
@@ -376,6 +402,31 @@ export function AuthPortal() {
           <form onSubmit={handleFormSubmit} className="mt-5 space-y-4">
             {mode === 'register' && (
               <>
+                <div className="flex items-center gap-3.5 p-3 rounded-2xl bg-[#070E20] border border-white/12">
+                  <AvatarDisplay
+                    fullName={fullName || 'Member'}
+                    sizeClass="w-12 h-12 text-sm"
+                    previewOverride={photoPreview}
+                  />
+                  <div className="space-y-1">
+                    <p className="text-xs font-medium text-sky-200/80">Profile Photo (Optional)</p>
+                    <input
+                      ref={registerPhotoRef}
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      onChange={handlePickRegisterPhoto}
+                      className="hidden"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => registerPhotoRef.current?.click()}
+                      className="min-h-[36px] px-3 rounded-lg bg-teal-500/20 hover:bg-teal-500/30 border border-teal-400/30 text-xs font-semibold text-teal-200 inline-flex items-center gap-1.5"
+                    >
+                      <Camera className="w-3.5 h-3.5" />
+                      <span>{photoPreview ? 'Change Photo' : 'Choose Photo'}</span>
+                    </button>
+                  </div>
+                </div>
                 <div>
                   <label className="block text-xs font-medium text-sky-200/80 mb-1.5">
                     Full Name
@@ -460,7 +511,7 @@ export function AuthPortal() {
             <>
               <div className="my-5 flex items-center gap-3">
                 <div className="h-px flex-1 bg-white/10" />
-                <span className="text-xs text-sky-200/50">or instant verified login</span>
+                <span className="text-xs text-sky-200/50">or continue with Google</span>
                 <div className="h-px flex-1 bg-white/10" />
               </div>
 
@@ -475,96 +526,6 @@ export function AuthPortal() {
               </button>
             </>
           )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-export function EmailVerificationScreen() {
-  const { firebaseUser, refreshUserState, logout } = useAuth();
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
-
-  const handleResend = async () => {
-    if (!firebaseUser) return;
-    setBusy(true);
-    setNotice(null);
-    try {
-      await sendEmailVerification(firebaseUser);
-      setNotice('Verification link sent. Check your inbox and spam folder.');
-    } catch (err) {
-      setNotice(err instanceof Error ? err.message : 'Could not resend email right now.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleCheckVerified = async () => {
-    setBusy(true);
-    setNotice(null);
-    try {
-      await refreshUserState();
-      if (!auth.currentUser?.emailVerified) {
-        setNotice('Email is not marked verified yet. Click the link in your email first.');
-      }
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="min-h-dvh flex items-center justify-center p-4">
-      <div className="max-w-md w-full rounded-3xl bg-[#0D1730] border border-teal-400/25 p-6 sm:p-8 space-y-5">
-        <div className="flex items-center justify-between gap-4">
-          <BrandWordmark size="sm" />
-          <div className="w-10 h-10 rounded-xl bg-teal-500/15 border border-teal-400/30 flex items-center justify-center text-teal-300 shrink-0">
-            <MailCheck className="w-5 h-5" />
-          </div>
-        </div>
-        <div>
-          <h1 className="text-xl font-bold text-white">Verify Your Email Address</h1>
-          <p className="text-sm text-sky-200/75 mt-1.5 leading-relaxed">
-            We sent a verification link to{' '}
-            <span className="text-white font-medium">{firebaseUser?.email}</span>. Verify your email
-            to submit your MTS Freelancing Zone registration for Admin approval.
-          </p>
-        </div>
-
-        {notice && (
-          <div className="p-3.5 rounded-xl bg-white/5 border border-white/10 text-xs text-sky-100">
-            {notice}
-          </div>
-        )}
-
-        <div className="space-y-3">
-          <button
-            type="button"
-            disabled={busy}
-            onClick={handleCheckVerified}
-            className="w-full min-h-[48px] px-4 rounded-xl bg-teal-500 hover:bg-teal-400 text-slate-950 font-semibold text-sm flex items-center justify-center gap-2 transition-colors whitespace-nowrap"
-          >
-            <RefreshCw className={`w-4 h-4 ${busy ? 'animate-spin' : ''}`} />
-            <span>I Verified My Email — Continue</span>
-          </button>
-
-          <button
-            type="button"
-            disabled={busy}
-            onClick={handleResend}
-            className="w-full min-h-[44px] px-4 rounded-xl bg-white/6 hover:bg-white/10 border border-white/10 text-sm text-white font-medium transition-colors whitespace-nowrap"
-          >
-            Resend Verification Email
-          </button>
-
-          <button
-            type="button"
-            onClick={logout}
-            className="w-full min-h-[44px] px-4 rounded-xl text-xs text-sky-200/70 hover:text-white flex items-center justify-center gap-1.5"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            <span>Sign out</span>
-          </button>
         </div>
       </div>
     </div>

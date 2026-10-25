@@ -15,6 +15,15 @@ function detectKnownStaticHost(): boolean {
 }
 
 let staticHostDetected = detectKnownStaticHost();
+let directRegistrationInFlight = false;
+
+export function setDirectRegistrationActive(active: boolean) {
+  directRegistrationInFlight = active;
+}
+
+export function isDirectRegistrationActive(): boolean {
+  return directRegistrationInFlight;
+}
 
 function toReadableError(err: unknown): Error {
   if (err instanceof Error) {

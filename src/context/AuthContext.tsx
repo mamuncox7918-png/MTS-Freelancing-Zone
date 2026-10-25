@@ -8,7 +8,7 @@ import {
   OperationType,
   handleFirestoreError,
 } from '../lib/firebase';
-import { apiRequest } from '../lib/api';
+import { apiRequest, isDirectRegistrationActive } from '../lib/api';
 import { MemberWallet, UserProfile } from '../types';
 
 interface AuthContextValue {
@@ -46,7 +46,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (!authReady || !firebaseUser || !firebaseUser.emailVerified) {
+    if (!authReady || !firebaseUser) {
       setProfile(null);
       setWallet(null);
       setProfileLoading(false);
@@ -70,6 +70,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           // Ensure bootstrapped project owner is promoted if needed
           if (
             !bootstrappedAttempted &&
+            firebaseUser.emailVerified &&
             firebaseUser.email?.toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL &&
             data.role !== 'admin'
           ) {
@@ -94,6 +95,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           // Automatically provision initial Admin when verified owner signs in
           if (
             !bootstrappedAttempted &&
+            firebaseUser.emailVerified &&
             firebaseUser.email?.toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL
           ) {
             bootstrappedAttempted = true;
@@ -114,6 +116,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               console.error('Initial admin auto-provision error:', e);
             }
           }
+
+          // Auto-complete registration for any member who created an email/password account earlier and already has displayName
+          const savedName = (firebaseUser.displayName || '').trim();
+          const providerId = firebaseUser.providerData[0]?.providerId || 'password';
+          if (
+            !bootstrappedAttempted &&
+            !isDirectRegistrationActive() &&
+            providerId === 'password' &&
+            savedName.length >= 2
+          ) {
+            bootstrappedAttempted = true;
+            try {
+              await apiRequest('/api/auth/register', {
+                method: 'POST',
+                body: {
+                  fullName: savedName,
+                  phone: '',
+                  authProvider: 'password',
+                },
+              });
+              return;
+            } catch (e) {
+              console.error('Member auto-registration recovery failed:', e);
+            }
+          }
+
           setProfile(null);
           setProfileLoading(false);
         }
@@ -150,7 +178,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       unsubUser();
       unsubWallet();
     };
-  }, [authReady, firebaseUser, firebaseUser?.emailVerified]);
+  }, [authReady, firebaseUser]);
 
   const refreshUserState = useCallback(async () => {
     if (!auth.currentUser) return;

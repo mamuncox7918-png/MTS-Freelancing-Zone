@@ -54,13 +54,10 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
   if (!currentUser) {
     throw new Error('Please sign in to continue.');
   }
-  if (!currentUser.emailVerified) {
-    throw new Error('Please verify your email address first before completing account operations.');
-  }
 
   const uid = currentUser.uid;
   const email = (currentUser.email || '').trim().toLowerCase();
-  const isInitialAdmin = email === BOOTSTRAPPED_ADMIN_EMAIL;
+  const isInitialAdmin = Boolean(currentUser.emailVerified) && email === BOOTSTRAPPED_ADMIN_EMAIL;
 
   // 1. POST /api/auth/register
   if (method === 'POST' && path === '/api/auth/register') {

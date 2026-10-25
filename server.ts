@@ -55,12 +55,6 @@ async function requireVerifiedAuth(req: AuthedRequest, _res: Response, next: Nex
       req.headers['x-firebase-token'],
       req.headers.authorization
     );
-    if (!authUser.emailVerified) {
-      throw new HttpError(
-        403,
-        'Please verify your email address first before completing account operations.'
-      );
-    }
     req.authUser = authUser;
     next();
   } catch (err) {
@@ -69,6 +63,9 @@ async function requireVerifiedAuth(req: AuthedRequest, _res: Response, next: Nex
 }
 
 async function assertCallerIsAdmin(authUser: VerifiedAuthUser): Promise<void> {
+  if (!authUser.emailVerified) {
+    throw new HttpError(403, 'Administrator accounts require a verified email.');
+  }
   if (isConfiguredAdminEmail(authUser.email)) {
     return;
   }
@@ -107,7 +104,7 @@ async function startServer() {
         throw new HttpError(400, 'Enter a valid Bangladeshi phone number (e.g., 01712345678).');
       }
 
-      const isInitialAdmin = isConfiguredAdminEmail(user.email);
+      const isInitialAdmin = Boolean(user.emailVerified) && isConfiguredAdminEmail(user.email);
 
       const outcome = await runAtomicTransaction<{
         status: string;

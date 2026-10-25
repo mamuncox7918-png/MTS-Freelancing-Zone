@@ -55,9 +55,8 @@ export default defineConfig(() => {
           globPatterns: ['**/*.{js,css,html,ico,png,jpg,svg,woff,woff2}'],
           globIgnores: [
             'assets/aistudio/Screenshot_*',
-            'assets/aistudio/IMG-20261025-WA0004*',
-            'assets/aistudio/IMG-20261025-WA0005*',
-            'assets/aistudio/IMG-20261025-WA0006*',
+            'assets/aistudio/IMG-20261025-WA000[4-9]*',
+            'assets/aistudio/IMG-20261025-WA00[1-9]*',
           ],
           runtimeCaching: [
             {

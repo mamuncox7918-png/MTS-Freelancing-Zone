@@ -26,26 +26,26 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isVerified() {
+    function isVerifiedAdminAuth() {
       return isSignedIn() && request.auth.token.email_verified == true;
     }
 
     function isBootstrappedAdmin() {
-      return isVerified() &&
+      return isVerifiedAdminAuth() &&
         request.auth.token.email is string &&
         request.auth.token.email.size() <= 150 &&
         request.auth.token.email.lower() == 'mamuncox7918@gmail.com';
     }
 
     function isAdmin() {
-      return isVerified() && (
+      return isVerifiedAdminAuth() && (
         isBootstrappedAdmin() ||
         exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );
     }
 
     function isApprovedMember() {
-      return isVerified() &&
+      return isSignedIn() &&
         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status == 'approved';
     }
@@ -290,9 +290,9 @@ service cloud.firestore {
     // =========================================================================
 
     match /admins/{adminId} {
-      allow get: if isVerified() && isValidId(adminId) && (request.auth.uid == adminId || isAdmin());
+      allow get: if isSignedIn() && isValidId(adminId) && (request.auth.uid == adminId || isAdmin());
       allow list: if false;
-      allow create: if isVerified() && isValidId(adminId) && isValidAdminRecord(incoming()) &&
+      allow create: if isVerifiedAdminAuth() && isValidId(adminId) && isValidAdminRecord(incoming()) &&
         incoming().uid == adminId &&
         incoming().createdAt == request.time &&
         isAdmin();
@@ -301,9 +301,9 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      allow get: if isVerified() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
-      allow list: if isBootstrappedAdmin() || (isVerified() && resource.data.uid == request.auth.uid);
-      allow create: if isVerified() && isValidId(userId) && isValidUserProfile(incoming()) &&
+      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.uid == request.auth.uid);
+      allow create: if isSignedIn() && isValidId(userId) && isValidUserProfile(incoming()) &&
         incoming().uid == userId &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time && (
@@ -324,7 +324,7 @@ service cloud.firestore {
             incoming().totalEarnings == 0
           )
         );
-      allow update: if isVerified() && isValidUserProfile(incoming()) && isValidId(userId) &&
+      allow update: if isSignedIn() && isValidUserProfile(incoming()) && isValidId(userId) &&
         incoming().uid == existing().uid &&
         incoming().memberId == existing().memberId &&
         incoming().createdAt == existing().createdAt &&
@@ -375,32 +375,32 @@ service cloud.firestore {
     }
 
     match /mediaAssets/{assetId} {
-      allow get: if isVerified() && isValidId(assetId) && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow get: if isSignedIn() && isValidId(assetId) && (resource.data.ownerId == request.auth.uid || isAdmin());
       allow list: if false;
-      allow create: if isVerified() && isValidId(assetId) && isValidMediaAsset(incoming()) &&
+      allow create: if isSignedIn() && isValidId(assetId) && isValidMediaAsset(incoming()) &&
         incoming().assetId == assetId &&
         incoming().ownerId == request.auth.uid &&
         incoming().createdAt == request.time &&
         exists(/databases/$(database)/documents/users/$(request.auth.uid));
       allow update: if false;
-      allow delete: if isVerified() && isValidId(assetId) &&
+      allow delete: if isSignedIn() && isValidId(assetId) &&
         resource.data.ownerId == request.auth.uid &&
         resource.data.purpose == 'avatar';
     }
 
     match /tasks/{taskId} {
-      allow get: if isVerified() && isValidId(taskId) && (
+      allow get: if isSignedIn() && isValidId(taskId) && (
         (resource.data.isActive == true && isApprovedMember()) ||
         isAdmin()
       );
-      allow list: if isBootstrappedAdmin() || (isVerified() && resource.data.isActive == true);
-      allow create: if isVerified() && isValidId(taskId) && isValidTaskItem(incoming()) &&
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.isActive == true);
+      allow create: if isVerifiedAdminAuth() && isValidId(taskId) && isValidTaskItem(incoming()) &&
         incoming().taskId == taskId &&
         incoming().createdBy == request.auth.uid &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
         isAdmin();
-      allow update: if isVerified() && isValidTaskItem(incoming()) && isValidId(taskId) &&
+      allow update: if isVerifiedAdminAuth() && isValidTaskItem(incoming()) && isValidId(taskId) &&
         incoming().taskId == existing().taskId &&
         incoming().taskCode == existing().taskCode &&
         incoming().createdBy == existing().createdBy &&
@@ -414,9 +414,9 @@ service cloud.firestore {
     }
 
     match /submissions/{submissionId} {
-      allow get: if isVerified() && isValidId(submissionId) && (resource.data.userId == request.auth.uid || isAdmin());
-      allow list: if isBootstrappedAdmin() || (isVerified() && resource.data.userId == request.auth.uid);
-      allow create: if isVerified() && isValidId(submissionId) && isValidTaskSubmission(incoming()) &&
+      allow get: if isSignedIn() && isValidId(submissionId) && (resource.data.userId == request.auth.uid || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && isValidId(submissionId) && isValidTaskSubmission(incoming()) &&
         incoming().submissionId == submissionId &&
         incoming().userId == request.auth.uid &&
         incoming().status == 'pending' &&
@@ -431,7 +431,7 @@ service cloud.firestore {
         get(/databases/$(database)/documents/tasks/$(incoming().taskId)).data.rewardAmount == incoming().rewardAmount &&
         exists(/databases/$(database)/documents/mediaAssets/$(incoming().screenshotAssetId)) &&
         get(/databases/$(database)/documents/mediaAssets/$(incoming().screenshotAssetId)).data.ownerId == request.auth.uid;
-      allow update: if isVerified() && isValidTaskSubmission(incoming()) && isValidId(submissionId) &&
+      allow update: if isVerifiedAdminAuth() && isValidTaskSubmission(incoming()) && isValidId(submissionId) &&
         incoming().submissionId == existing().submissionId &&
         incoming().taskId == existing().taskId &&
         incoming().userId == existing().userId &&
@@ -449,9 +449,9 @@ service cloud.firestore {
     }
 
     match /wallets/{userId} {
-      allow get: if isVerified() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
-      allow list: if isBootstrappedAdmin() || (isVerified() && resource.data.userId == request.auth.uid);
-      allow create: if isVerified() && isValidId(userId) && isValidMemberWallet(incoming()) &&
+      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && isValidId(userId) && isValidMemberWallet(incoming()) &&
         incoming().userId == userId &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time && (
@@ -466,7 +466,7 @@ service cloud.firestore {
             (!('lastWithdrawalId' in incoming()) || incoming().lastWithdrawalId == '')
           )
         );
-      allow update: if isVerified() && isValidMemberWallet(incoming()) && isValidId(userId) &&
+      allow update: if isSignedIn() && isValidMemberWallet(incoming()) && isValidId(userId) &&
         incoming().userId == existing().userId &&
         incoming().memberId == existing().memberId &&
         incoming().createdAt == existing().createdAt &&
@@ -501,9 +501,9 @@ service cloud.firestore {
     }
 
     match /transactions/{transactionId} {
-      allow get: if isVerified() && isValidId(transactionId) && (resource.data.userId == request.auth.uid || isAdmin());
-      allow list: if isBootstrappedAdmin() || (isVerified() && resource.data.userId == request.auth.uid);
-      allow create: if isVerified() && isValidId(transactionId) && isValidWalletTransaction(incoming()) &&
+      allow get: if isSignedIn() && isValidId(transactionId) && (resource.data.userId == request.auth.uid || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && isValidId(transactionId) && isValidWalletTransaction(incoming()) &&
         incoming().transactionId == transactionId &&
         incoming().createdAt == request.time && (
           isAdmin() ||
@@ -524,9 +524,9 @@ service cloud.firestore {
     }
 
     match /withdrawals/{withdrawalId} {
-      allow get: if isVerified() && isValidId(withdrawalId) && (resource.data.userId == request.auth.uid || isAdmin());
-      allow list: if isBootstrappedAdmin() || (isVerified() && resource.data.userId == request.auth.uid);
-      allow create: if isVerified() && isValidId(withdrawalId) && isValidWithdrawalRequest(incoming()) &&
+      allow get: if isSignedIn() && isValidId(withdrawalId) && (resource.data.userId == request.auth.uid || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && isValidId(withdrawalId) && isValidWithdrawalRequest(incoming()) &&
         incoming().withdrawalId == withdrawalId &&
         incoming().userId == request.auth.uid &&
         incoming().status == 'pending' &&
@@ -539,7 +539,7 @@ service cloud.firestore {
         isApprovedMember() &&
         get(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.availableBalance >= incoming().grossAmount &&
         getAfter(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.availableBalance == get(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.availableBalance - incoming().grossAmount;
-      allow update: if isVerified() && isValidWithdrawalRequest(incoming()) && isValidId(withdrawalId) &&
+      allow update: if isVerifiedAdminAuth() && isValidWithdrawalRequest(incoming()) && isValidId(withdrawalId) &&
         incoming().withdrawalId == existing().withdrawalId &&
         incoming().userId == existing().userId &&
         incoming().grossAmount == existing().grossAmount &&
@@ -560,9 +560,9 @@ service cloud.firestore {
     }
 
     match /passwordChangeRequests/{requestId} {
-      allow get: if isVerified() && isValidId(requestId) && (resource.data.userId == request.auth.uid || isAdmin());
-      allow list: if isBootstrappedAdmin() || (isVerified() && resource.data.userId == request.auth.uid);
-      allow create: if isVerified() && isValidId(requestId) && isValidPasswordChangeRequest(incoming()) &&
+      allow get: if isSignedIn() && isValidId(requestId) && (resource.data.userId == request.auth.uid || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && isValidId(requestId) && isValidPasswordChangeRequest(incoming()) &&
         incoming().requestId == requestId &&
         incoming().userId == request.auth.uid &&
         incoming().status == 'pending' &&
@@ -572,7 +572,7 @@ service cloud.firestore {
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
         isApprovedMember();
-      allow update: if isVerified() && isValidPasswordChangeRequest(incoming()) && isValidId(requestId) &&
+      allow update: if isSignedIn() && isValidPasswordChangeRequest(incoming()) && isValidId(requestId) &&
         incoming().requestId == existing().requestId &&
         incoming().userId == existing().userId &&
         incoming().reason == existing().reason &&
@@ -600,9 +600,9 @@ service cloud.firestore {
     }
 
     match /adminAuditLogs/{logId} {
-      allow get: if isVerified() && isValidId(logId) && isAdmin();
+      allow get: if isVerifiedAdminAuth() && isValidId(logId) && isAdmin();
       allow list: if isBootstrappedAdmin() || (isBootstrappedAdmin() && resource.data.adminUid == request.auth.uid);
-      allow create: if isVerified() && isValidId(logId) && isValidAdminAuditLog(incoming()) &&
+      allow create: if isVerifiedAdminAuth() && isValidId(logId) && isValidAdminAuditLog(incoming()) &&
         incoming().logId == logId &&
         incoming().adminUid == request.auth.uid &&
         incoming().createdAt == request.time &&
