@@ -51,9 +51,15 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          cleanupOutdatedCaches: true,
+          clientsClaim: true,
+          skipWaiting: true,
+          maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
           navigateFallbackDenylist: [/^\/api\//],
           globPatterns: ['**/*.{js,css,html,ico,png,jpg,svg,woff,woff2}'],
           globIgnores: [
+            '_headers',
+            '_redirects',
             'assets/aistudio/Screenshot_*',
             'assets/aistudio/IMG-20261025-WA000[4-9]*',
             'assets/aistudio/IMG-20261025-WA00[1-9]*',

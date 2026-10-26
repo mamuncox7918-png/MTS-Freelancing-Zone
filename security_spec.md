@@ -11,7 +11,12 @@
    - Assistant Admin approval of `/submissions/{submissionId}` can update `/wallets/{userId}` ONLY when atomically coupled via `get()` (`status == 'pending'`) + `getAfter()` (`status == 'approved'`) on that exact `submissionId`, adding the exact predefined `rewardAmount` once and creating deterministic `/transactions/tx_reward_${submissionId}`.
    - Custom task payments (`/customTasks/{customTaskId}`) can ONLY transition to `'approved'` or `'rejected'` via Main Admin (`isAdmin()`), crediting `approvedAmount` once with deterministic `/transactions/tx_custom_${customTaskId}` and notifying the member via `/notifications/{notificationId}`.
 3. **Rejection Reason Enforcement**: Rejecting either an official `/submissions/{id}` or a `/customTasks/{id}` strictly enforces `rejectionReason.size() >= 3`.
-4. **PII & Private Financial Isolation**: `/users`, `/wallets`, `/submissions`, `/customTasks`, `/notifications`, `/transactions`, `/withdrawals`, `/passwordChangeRequests`, and `/mediaAssets` forbid cross-member reads and enforce `resource.data.userId == request.auth.uid` on member list queries.
+4. **PII & Private Financial Isolation**: `/users`, `/wallets`, `/submissions`, `/customTasks`, `/notifications`, `/transactions`, `/withdrawals`, `/passwordChangeRequests`, and `/leaderboardAdminNotes` forbid cross-member reads and enforce `resource.data.userId == request.auth.uid` on member list queries. `/mediaAssets` keeps `allow list: if false` and restricts `purpose == 'proof'` strictly to owner + Admin/Assistant Admin, while permitting authenticated `get` on `purpose == 'avatar'` so leaderboard display avatars load without exposing proof screenshots.
+5. **Best 10 Monthly Leaderboard Integrity (`Asia/Dhaka`, UTC+6)**:
+   - `/monthlyMemberEarnings/{monthKey}_{userId}`, `/leaderboardPeriods/{monthKey}`, and `/leaderboardWinners/{winnerId}` store zero PII (no email, phone, account numbers, or private ledger details).
+   - Members can never self-create or alter `eligibleEarnings`, `approvedTaskCount`, or `reachedAtMs`; a member can only sync their own `displayName` and `photoAssetId` on an existing `/monthlyMemberEarnings` record.
+   - Assistant Admins can only increment `/monthlyMemberEarnings` when atomically coupled via `get()` (`status == 'pending'`) + `getAfter()` (`status == 'approved'`) to a newly approved official `/submissions/{submissionId}` by that exact `rewardAmount`.
+   - Only Main Admin (`isAdmin()`) can configure/publish `/leaderboardPeriods`, finalize `/leaderboardWinners`, record `/leaderboardAdminNotes`, or reverse/recalculate earnings.
 
 ---
 
@@ -39,5 +44,6 @@
     Approved member attempts a withdrawal with `grossAmount: 99`.
 11. **Payload 11 — Cross-Member Custom Task Scraping (`customTasks` list)**:
     Approved member `member_1` attempts an unfiltered `getDocs(collection(db, "customTasks"))`.
-12. **Payload 12 — Plaintext Password Injection (`passwordChangeRequests` create)**:
-    Member attempts to inject `{ newPassword: "secret123" }` into `/passwordChangeRequests`.
+12. **Payload 12 — Member Leaderboard Score Spoofing & Reward Tampering (`monthlyMemberEarnings` / `leaderboardPeriods`)**:
+    Member or Assistant Admin attempts to forge `/monthlyMemberEarnings/2026-10_member_1` with inflated `eligibleEarnings` or modify `/leaderboardPeriods/2026-10`.
+

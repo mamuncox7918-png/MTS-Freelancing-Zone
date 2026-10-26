@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { collection, onSnapshot } from 'firebase/firestore';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import {
   CheckCircle2,
   Clock,
@@ -8,6 +8,7 @@ import {
   Plus,
   Search,
   ShieldCheck,
+  Trophy,
   UserCheck,
   UserPlus,
   X,
@@ -15,6 +16,12 @@ import {
 } from 'lucide-react';
 import { db, OperationType, handleFirestoreError } from '../lib/firebase';
 import { apiRequest, formatBdt, formatDateTime, formatShortDate, toMillis } from '../lib/api';
+import {
+  computeMonthlyLeaderboardFromTransactions,
+  getDhakaMonthBounds,
+  getDhakaMonthKey,
+} from '../lib/leaderboard';
+import { AdminBest10Section } from './AdminBest10Section';
 import { AvatarDisplay, ProofScreenshotViewer } from './MediaView';
 import {
   AdminAuditLog,
@@ -27,6 +34,7 @@ import {
   MAX_TASK_INSTRUCTIONS_LENGTH,
   MAX_TASK_TITLE_LENGTH,
   MemberWallet,
+  MonthlyMemberEarning,
   PasswordChangeRequest,
   TaskItem,
   TaskSubmission,
@@ -37,6 +45,7 @@ import {
 
 export type AdminTab =
   | 'overview'
+  | 'best_10'
   | 'members'
   | 'assistants'
   | 'tasks'
@@ -77,6 +86,8 @@ export function AdminPanel({
   const [transactions, setTransactions] = useState<WalletTransaction[]>([]);
   const [passwordRequests, setPasswordRequests] = useState<PasswordChangeRequest[]>([]);
   const [auditLogs, setAuditLogs] = useState<AdminAuditLog[]>([]);
+  const [currentMonthEntries, setCurrentMonthEntries] = useState<MonthlyMemberEarning[]>([]);
+  const initialLeaderboardSyncedRef = useRef<boolean>(false);
 
   const [banner, setBanner] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
   const [cardError, setCardError] = useState<{ id: string; text: string } | null>(null);
@@ -228,10 +239,62 @@ export function AdminPanel({
         },
         (err) => handleFirestoreError(err, OperationType.LIST, 'assistantAdmins')
       ),
+      onSnapshot(
+        query(
+          collection(db, 'monthlyMemberEarnings'),
+          where('monthKey', '==', getDhakaMonthKey())
+        ),
+        (snap) => {
+          setCurrentMonthEntries(snap.docs.map((d) => d.data() as MonthlyMemberEarning));
+        },
+        (err) => handleFirestoreError(err, OperationType.LIST, 'monthlyMemberEarnings')
+      ),
     ];
 
     return () => unsubs.forEach((u) => u());
   }, [currentAdmin.role]);
+
+  const currentDhakaMonthKey = useMemo(() => getDhakaMonthKey(), []);
+  const currentDhakaBounds = useMemo(
+    () => getDhakaMonthBounds(currentDhakaMonthKey),
+    [currentDhakaMonthKey]
+  );
+  const currentMonthLeaderboard = useMemo(
+    () => computeMonthlyLeaderboardFromTransactions(currentDhakaMonthKey, transactions, users),
+    [currentDhakaMonthKey, transactions, users]
+  );
+
+  // One-time silent reconciliation for current Asia/Dhaka month if earlier tasks exist
+  useEffect(() => {
+    if (currentAdmin.role !== 'admin') return;
+    if (initialLeaderboardSyncedRef.current) return;
+    if (users.length === 0) return;
+
+    const existingMap = new Map(currentMonthEntries.map((e) => [e.userId, e]));
+    const needsSync =
+      currentMonthLeaderboard.allMemberStats.some((stat) => {
+        const prev = existingMap.get(stat.userId);
+        return !prev || prev.eligibleEarnings !== stat.eligibleEarnings;
+      }) ||
+      currentMonthEntries.some(
+        (prev) =>
+          prev.eligibleEarnings > 0 &&
+          !currentMonthLeaderboard.allMemberStats.some((s) => s.userId === prev.userId)
+      );
+
+    if (!needsSync) return;
+    initialLeaderboardSyncedRef.current = true;
+    apiRequest('/api/admin/leaderboard/recalculate', {
+      method: 'POST',
+      body: { monthKey: currentDhakaMonthKey, silentAutoSync: true },
+    }).catch(() => undefined);
+  }, [
+    currentAdmin.role,
+    users.length,
+    currentMonthEntries,
+    currentMonthLeaderboard.allMemberStats,
+    currentDhakaMonthKey,
+  ]);
 
   const walletByUid = useMemo(() => {
     const map = new Map<string, MemberWallet>();
@@ -833,6 +896,7 @@ export function AdminPanel({
 
   const navItems: { id: AdminTab; label: string }[] = [
     { id: 'overview', label: 'Overview' },
+    { id: 'best_10', label: `Best 10 (${currentMonthLeaderboard.top10.length})` },
     { id: 'members', label: `Members (${stats.pendingMembers})` },
     { id: 'assistants', label: `Assistant Admins (${stats.activeAssistantsCount})` },
     { id: 'tasks', label: `Tasks (${tasks.length})` },
@@ -982,7 +1046,29 @@ export function AdminPanel({
             </button>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <button
+              type="button"
+              onClick={() => setActiveTab('best_10')}
+              className="text-left rounded-2xl bg-[#0D1730]/95 border border-amber-400/35 p-5 flex items-center justify-between gap-4"
+            >
+              <div>
+                <p className="text-xs text-sky-200/75 inline-flex items-center gap-1.5">
+                  <Trophy className="w-3.5 h-3.5 text-amber-300" />
+                  <span>Best 10 ({currentDhakaBounds.monthLabel})</span>
+                </p>
+                <p className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-amber-300">
+                  {currentMonthLeaderboard.top10.length} / 10
+                </p>
+                <p className="mt-1 text-xs text-sky-200/60">
+                  Configure prizes, finalize archives & track delivery
+                </p>
+              </div>
+              <span className="min-h-[38px] px-3 rounded-xl bg-amber-400/15 text-amber-200 text-xs font-semibold inline-flex items-center shrink-0">
+                Manage Best 10
+              </span>
+            </button>
+
             <button
               type="button"
               onClick={() => {
@@ -2374,6 +2460,16 @@ export function AdminPanel({
             ))
           )}
         </div>
+      )}
+
+      {/* 10. BEST 10 MONTHLY LEADERBOARD MANAGEMENT */}
+      {activeTab === 'best_10' && (
+        <AdminBest10Section
+          users={users}
+          transactions={transactions}
+          auditLogs={auditLogs}
+          onBanner={setBanner}
+        />
       )}
 
       {/* MODAL: Create / Edit Task */}

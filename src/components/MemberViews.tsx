@@ -24,12 +24,14 @@ import {
   Send,
   ShieldAlert,
   Trash2,
+  Trophy,
   Upload,
   Wallet,
   X,
   XCircle,
 } from 'lucide-react';
 import { auth } from '../lib/firebase';
+import { getDhakaMonthBounds, getDhakaMonthKey } from '../lib/leaderboard';
 import {
   apiRequest,
   formatBdt,
@@ -135,6 +137,7 @@ export function MemberDashboardView({
   }, [tasks, submissions]);
 
   const recentTransactions = useMemo(() => transactions.slice(0, 5), [transactions]);
+  const currentDhakaMonth = useMemo(() => getDhakaMonthBounds(getDhakaMonthKey()), []);
 
   return (
     <div className="space-y-6">
@@ -180,6 +183,14 @@ export function MemberDashboardView({
           )}
           <button
             type="button"
+            onClick={() => onNavigate('best_10')}
+            className="min-h-[44px] px-4 rounded-xl bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/40 text-xs sm:text-sm font-semibold text-amber-200 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+          >
+            <Trophy className="w-4 h-4 text-amber-300" />
+            <span>Best 10</span>
+          </button>
+          <button
+            type="button"
             onClick={() => onNavigate('custom_task')}
             className="min-h-[44px] px-4 rounded-xl bg-teal-500/15 hover:bg-teal-500/25 border border-teal-400/35 text-xs sm:text-sm font-semibold text-teal-200 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
           >
@@ -203,16 +214,20 @@ export function MemberDashboardView({
         </div>
       </div>
 
-      {/* Unread Task & Custom Task Decision Notifications */}
+      {/* Unread Task, Custom Task & Leaderboard Decision Notifications */}
       {unreadNotifications.length > 0 && (
         <div className="space-y-2.5">
           {unreadNotifications.map((n) => {
-            const isApproved = n.type === 'custom_task_approved' || n.type === 'task_approved';
+            const isReward = n.type === 'leaderboard_reward';
+            const isApproved =
+              n.type === 'custom_task_approved' || n.type === 'task_approved' || isReward;
             return (
               <div
                 key={n.notificationId}
                 className={`p-4 rounded-2xl border flex items-start justify-between gap-3 ${
-                  isApproved
+                  isReward
+                    ? 'bg-amber-400/12 border-amber-400/40 text-amber-100'
+                    : isApproved
                     ? 'bg-emerald-500/12 border-emerald-400/35 text-emerald-100'
                     : 'bg-rose-500/12 border-rose-400/35 text-rose-100'
                 }`}
@@ -316,28 +331,60 @@ export function MemberDashboardView({
         </button>
       </div>
 
-      {/* Custom Task Submission Quick Access Card (Mobile & Desktop) */}
-      <div className="rounded-2xl bg-gradient-to-r from-[#0E1E3E] via-[#0C1934] to-[#0D1730] border border-teal-400/30 p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div className="flex items-start gap-3.5 min-w-0">
-          <div className="w-10 h-10 rounded-xl bg-teal-500/20 border border-teal-400/35 flex items-center justify-center text-teal-300 shrink-0">
-            <FilePlus2 className="w-5 h-5" />
+      {/* Best 10 Monthly Leaderboard & Custom Task Feature Row */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Best 10 Monthly Leaderboard Menu Card */}
+        <div className="rounded-2xl bg-gradient-to-r from-[#1A1A3A] via-[#101C3D] to-[#0D1730] border border-amber-400/35 p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3.5 min-w-0">
+            <div className="w-11 h-11 rounded-xl bg-amber-400/20 border border-amber-400/40 flex items-center justify-center text-amber-300 shrink-0">
+              <Trophy className="w-5 h-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-sm sm:text-base font-bold text-white">Best 10</h2>
+                <span className="px-2 py-0.5 rounded-md bg-amber-400/15 border border-amber-400/30 text-[11px] font-mono tabular-nums font-semibold text-amber-200">
+                  {currentDhakaMonth.monthLabel}
+                </span>
+              </div>
+              <p className="text-xs text-sky-200/75 mt-0.5 leading-relaxed">
+                Monthly Top Earners — live BDT ranking of the top 10 approved task earners this
+                month.
+              </p>
+            </div>
           </div>
-          <div className="min-w-0">
-            <h2 className="text-sm sm:text-base font-bold text-white">Custom Task Submission</h2>
-            <p className="text-xs text-sky-200/75 mt-0.5 leading-relaxed">
-              Completed work outside the official task list? Submit task details and request an
-              individual BDT payment ({pendingCustomCount} pending · {approvedCustomCount} approved).
-            </p>
-          </div>
+          <button
+            type="button"
+            onClick={() => onNavigate('best_10')}
+            className="min-h-[44px] px-4 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs sm:text-sm font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+          >
+            <Trophy className="w-4 h-4" />
+            <span>Open Best 10</span>
+          </button>
         </div>
-        <button
-          type="button"
-          onClick={() => onNavigate('custom_task')}
-          className="min-h-[44px] px-4 rounded-xl bg-teal-500 hover:bg-teal-400 text-slate-950 text-xs sm:text-sm font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
-        >
-          <FilePlus2 className="w-4 h-4" />
-          <span>Submit Custom Task</span>
-        </button>
+
+        {/* Custom Task Submission Quick Access Card */}
+        <div className="rounded-2xl bg-gradient-to-r from-[#0E1E3E] via-[#0C1934] to-[#0D1730] border border-teal-400/30 p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3.5 min-w-0">
+            <div className="w-11 h-11 rounded-xl bg-teal-500/20 border border-teal-400/35 flex items-center justify-center text-teal-300 shrink-0">
+              <FilePlus2 className="w-5 h-5" />
+            </div>
+            <div className="min-w-0">
+              <h2 className="text-sm sm:text-base font-bold text-white">Custom Task Submission</h2>
+              <p className="text-xs text-sky-200/75 mt-0.5 leading-relaxed">
+                Completed work outside the official task list? Request an individual BDT payment (
+                {pendingCustomCount} pending · {approvedCustomCount} approved).
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => onNavigate('custom_task')}
+            className="min-h-[44px] px-4 rounded-xl bg-teal-500 hover:bg-teal-400 text-slate-950 text-xs sm:text-sm font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+          >
+            <FilePlus2 className="w-4 h-4" />
+            <span>Submit Custom Task</span>
+          </button>
+        </div>
       </div>
 
       {/* Two-Column Content Split on Desktop */}
@@ -1713,6 +1760,8 @@ export function MemberWalletView({
                         ? 'Reward Credit'
                         : tx.type === 'custom_task_reward'
                         ? 'Custom Task Payment Credit'
+                        : tx.type === 'earning_reversal'
+                        ? 'Admin Earning Reversal'
                         : tx.type === 'withdrawal_request'
                         ? `Gross ${formatBdt(tx.amount)} · Fee ${formatBdt(tx.feeAmount)} · Net ${formatBdt(tx.netAmount)}`
                         : tx.type === 'withdrawal_paid'

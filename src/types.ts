@@ -121,7 +121,9 @@ export type NotificationType =
   | 'custom_task_approved'
   | 'custom_task_rejected'
   | 'task_approved'
-  | 'task_rejected';
+  | 'task_rejected'
+  | 'earning_reversed'
+  | 'leaderboard_reward';
 
 export interface MemberNotification {
   notificationId: string;
@@ -138,6 +140,7 @@ export interface MemberNotification {
 export type TransactionType =
   | 'task_reward'
   | 'custom_task_reward'
+  | 'earning_reversal'
   | 'withdrawal_request'
   | 'withdrawal_paid'
   | 'withdrawal_refund';
@@ -221,6 +224,80 @@ export interface MediaAsset {
   createdAt: unknown;
 }
 
+export interface MonthlyMemberEarning {
+  entryId: string;
+  monthKey: string;
+  userId: string;
+  displayName: string;
+  photoAssetId: string;
+  isEligibleMember: boolean;
+  eligibleEarnings: number;
+  approvedTaskCount: number;
+  reachedAtMs: number;
+  lastTransactionId: string;
+  lastSubmissionId: string;
+  createdAt: unknown;
+  updatedAt: unknown;
+}
+
+export interface LeaderboardRankRewardConfig {
+  rank: number;
+  prizeTitle: string;
+  prizeDescription: string;
+  monetaryValue: number;
+  enabled: boolean;
+}
+
+export type LeaderboardPeriodStatus = 'open' | 'finalized';
+
+export interface LeaderboardPeriod {
+  monthKey: string;
+  status: LeaderboardPeriodStatus;
+  rewardsPublished: boolean;
+  announcementDate: string;
+  rewardNote: string;
+  rewards: LeaderboardRankRewardConfig[];
+  finalizedAt: string;
+  finalizedBy: string;
+  winnerCount: number;
+  lastSyncedAt: string;
+  createdAt: unknown;
+  updatedAt: unknown;
+}
+
+export type LeaderboardRewardStatus = 'pending' | 'approved' | 'awarded' | 'cancelled';
+
+export interface LeaderboardWinner {
+  winnerId: string;
+  monthKey: string;
+  rank: number;
+  userId: string;
+  displayName: string;
+  photoAssetId: string;
+  eligibleEarnings: number;
+  approvedTaskCount: number;
+  reachedAtMs: number;
+  prizeTitle: string;
+  prizeDescription: string;
+  monetaryValue: number;
+  rewardStatus: LeaderboardRewardStatus;
+  deliveredAt: string;
+  createdAt: unknown;
+  updatedAt: unknown;
+}
+
+export interface LeaderboardWinnerAdminMeta {
+  winnerId: string;
+  monthKey: string;
+  rank: number;
+  userId: string;
+  memberId: string;
+  adminNote: string;
+  updatedBy: string;
+  createdAt: unknown;
+  updatedAt: unknown;
+}
+
 // Validation constants synchronized with firebase-blueprint.json & firestore.rules
 export const FIXED_WITHDRAWAL_FEE = 5;
 export const MIN_WITHDRAWAL_GROSS = 100;
@@ -234,6 +311,7 @@ export const MAX_REASON_LENGTH = 300;
 
 export type MemberPageTab =
   | 'home'
+  | 'best_10'
   | 'tasks'
   | 'custom_task'
   | 'completed'
@@ -242,3 +320,4 @@ export type MemberPageTab =
   | 'withdraw'
   | 'profile'
   | 'admin';
+

@@ -14,11 +14,23 @@ import {
   commitSingleOrBatchWrites,
   firebaseConfig,
   getDocRest,
+  listCollectionRest,
   preserveTimestamp,
   queryByUserFieldRest,
   runAtomicTransaction,
   verifyFirebaseIdToken,
 } from './server/firestoreRest.ts';
+import {
+  buildMonthlyEntryId,
+  buildWinnerDocId,
+  computeMonthlyLeaderboardFromTransactions,
+  createEmptyRewardConfigs,
+  extractTimestampMs,
+  getDhakaMonthKey,
+  isValidMonthKey,
+  normalizeRewardConfigs,
+} from './src/lib/leaderboard.ts';
+import type { UserProfile, WalletTransaction } from './src/types.ts';
 
 dotenv.config();
 
@@ -372,6 +384,10 @@ async function startServer() {
           }
         }
 
+        const currentMonthKey = getDhakaMonthKey(Date.now());
+        const monthlyEntryId = buildMonthlyEntryId(currentMonthKey, user.uid);
+        const monthlyEntry = await tx.get('monthlyMemberEarnings', monthlyEntryId);
+
         const prevPhotoId = String(profile.data.photoAssetId || '');
         const writes = [
           buildReplaceUpdateWrite(
@@ -387,6 +403,22 @@ async function startServer() {
             profile.updateTime
           ),
         ];
+
+        if (monthlyEntry) {
+          writes.push(
+            buildReplaceUpdateWrite(
+              'monthlyMemberEarnings',
+              monthlyEntryId,
+              {
+                ...monthlyEntry.data,
+                displayName: fullName,
+                photoAssetId,
+                createdAt: preserveTimestamp(monthlyEntry.raw, 'createdAt'),
+              },
+              monthlyEntry.updateTime
+            )
+          );
+        }
 
         if (prevPhotoId && prevPhotoId !== photoAssetId) {
           writes.push(buildDeleteWrite('mediaAssets', prevPhotoId));
@@ -1056,8 +1088,17 @@ async function startServer() {
           const taskCode = String(submission.data.taskCode || 'TSK-00000');
           const rewardAmount = Number(submission.data.rewardAmount);
 
-          const memberProfile = await tx.get('users', memberUid);
-          const memberWallet = await tx.get('wallets', memberUid);
+          const nowMs = Date.parse(nowIso);
+          const monthKey = getDhakaMonthKey(nowMs);
+          const monthlyEntryId = buildMonthlyEntryId(monthKey, memberUid);
+
+          const [memberProfile, memberWallet, monthlyEntry] = await Promise.all([
+            tx.get('users', memberUid),
+            tx.get('wallets', memberUid),
+            decision === 'approved'
+              ? tx.get('monthlyMemberEarnings', monthlyEntryId)
+              : Promise.resolve(null),
+          ]);
 
           const logId = generateDocId('log');
           const notifId = generateDocId('ntf');
@@ -1141,6 +1182,63 @@ async function startServer() {
                   memberProfile.updateTime
                 )
               );
+
+              if (
+                memberProfile.data.role === 'member' &&
+                memberProfile.data.status === 'approved'
+              ) {
+                const displayName = String(
+                  memberProfile.data.fullName || submission.data.memberName || 'Member'
+                ).slice(0, 300);
+                const photoAssetId = String(memberProfile.data.photoAssetId || '');
+                if (monthlyEntry) {
+                  writes.push(
+                    buildReplaceUpdateWrite(
+                      'monthlyMemberEarnings',
+                      monthlyEntryId,
+                      {
+                        ...monthlyEntry.data,
+                        displayName,
+                        photoAssetId,
+                        isEligibleMember: true,
+                        eligibleEarnings:
+                          Number(monthlyEntry.data.eligibleEarnings || 0) + rewardAmount,
+                        approvedTaskCount:
+                          Number(monthlyEntry.data.approvedTaskCount || 0) + 1,
+                        reachedAtMs: Math.max(
+                          nowMs,
+                          Number(monthlyEntry.data.reachedAtMs || 0)
+                        ),
+                        lastTransactionId: txLedgerId,
+                        lastSubmissionId: submissionId,
+                        createdAt: preserveTimestamp(monthlyEntry.raw, 'createdAt'),
+                      },
+                      monthlyEntry.updateTime
+                    )
+                  );
+                } else {
+                  writes.push(
+                    buildCreateWrite(
+                      'monthlyMemberEarnings',
+                      monthlyEntryId,
+                      {
+                        entryId: monthlyEntryId,
+                        monthKey,
+                        userId: memberUid,
+                        displayName,
+                        photoAssetId,
+                        isEligibleMember: true,
+                        eligibleEarnings: rewardAmount,
+                        approvedTaskCount: 1,
+                        reachedAtMs: nowMs,
+                        lastTransactionId: txLedgerId,
+                        lastSubmissionId: submissionId,
+                      },
+                      ['createdAt', 'updatedAt']
+                    )
+                  );
+                }
+              }
             }
 
             writes.push(
@@ -2046,8 +2144,17 @@ async function startServer() {
             throw new HttpError(400, 'Approved amount must be a whole Taka integer between ৳1 and ৳100,000.');
           }
 
-          const memberProfile = await tx.get('users', memberUid);
-          const memberWallet = await tx.get('wallets', memberUid);
+          const nowMs = Date.parse(nowIso);
+          const monthKey = getDhakaMonthKey(nowMs);
+          const monthlyEntryId = buildMonthlyEntryId(monthKey, memberUid);
+
+          const [memberProfile, memberWallet, monthlyEntry] = await Promise.all([
+            tx.get('users', memberUid),
+            tx.get('wallets', memberUid),
+            decision === 'approved'
+              ? tx.get('monthlyMemberEarnings', monthlyEntryId)
+              : Promise.resolve(null),
+          ]);
 
           const txLedgerId = decision === 'approved' ? `tx_custom_${customTaskId}` : '';
           const notifId = generateDocId('ntf');
@@ -2128,6 +2235,63 @@ async function startServer() {
                   memberProfile.updateTime
                 )
               );
+
+              if (
+                memberProfile.data.role === 'member' &&
+                memberProfile.data.status === 'approved'
+              ) {
+                const displayName = String(
+                  memberProfile.data.fullName || customTask.data.memberName || 'Member'
+                ).slice(0, 300);
+                const photoAssetId = String(memberProfile.data.photoAssetId || '');
+                if (monthlyEntry) {
+                  writes.push(
+                    buildReplaceUpdateWrite(
+                      'monthlyMemberEarnings',
+                      monthlyEntryId,
+                      {
+                        ...monthlyEntry.data,
+                        displayName,
+                        photoAssetId,
+                        isEligibleMember: true,
+                        eligibleEarnings:
+                          Number(monthlyEntry.data.eligibleEarnings || 0) + finalApprovedAmount,
+                        approvedTaskCount:
+                          Number(monthlyEntry.data.approvedTaskCount || 0) + 1,
+                        reachedAtMs: Math.max(
+                          nowMs,
+                          Number(monthlyEntry.data.reachedAtMs || 0)
+                        ),
+                        lastTransactionId: txLedgerId,
+                        lastSubmissionId: customTaskId,
+                        createdAt: preserveTimestamp(monthlyEntry.raw, 'createdAt'),
+                      },
+                      monthlyEntry.updateTime
+                    )
+                  );
+                } else {
+                  writes.push(
+                    buildCreateWrite(
+                      'monthlyMemberEarnings',
+                      monthlyEntryId,
+                      {
+                        entryId: monthlyEntryId,
+                        monthKey,
+                        userId: memberUid,
+                        displayName,
+                        photoAssetId,
+                        isEligibleMember: true,
+                        eligibleEarnings: finalApprovedAmount,
+                        approvedTaskCount: 1,
+                        reachedAtMs: nowMs,
+                        lastTransactionId: txLedgerId,
+                        lastSubmissionId: customTaskId,
+                      },
+                      ['createdAt', 'updatedAt']
+                    )
+                  );
+                }
+              }
             }
 
             writes.push(
@@ -2279,6 +2443,1238 @@ async function startServer() {
     }
   );
 
+  // =========================================================================
+  // 11. Best 10 Monthly Leaderboard & Rewards Management (Main Admin Exclusive)
+  // =========================================================================
+
+  // 11A. Configure & Publish Monthly Rewards (Positions 1st–10th)
+  app.post(
+    '/api/admin/leaderboard/rewards',
+    requireVerifiedAuth,
+    async (req: AuthedRequest, res: Response, next: NextFunction) => {
+      try {
+        const admin = req.authUser!;
+        await assertCallerIsAdmin(admin);
+
+        const monthKey = typeof req.body?.monthKey === 'string' ? req.body.monthKey.trim() : '';
+        if (!isValidMonthKey(monthKey)) {
+          throw new HttpError(400, 'Valid month key (YYYY-MM) is required.');
+        }
+
+        const rewards = normalizeRewardConfigs(req.body?.rewards);
+        const rewardsPublished = Boolean(req.body?.rewardsPublished);
+        const announcementDate =
+          typeof req.body?.announcementDate === 'string'
+            ? req.body.announcementDate.trim().slice(0, 40)
+            : '';
+        const rewardNote =
+          typeof req.body?.rewardNote === 'string'
+            ? req.body.rewardNote.trim().slice(0, 1000)
+            : '';
+        const confirmFinalizedEdit = Boolean(req.body?.confirmFinalizedEdit);
+        const reason =
+          typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 300) : '';
+
+        const existingPeriod = await getDocRest('leaderboardPeriods', monthKey, admin.idToken);
+        const isFinalized = existingPeriod?.data?.status === 'finalized';
+
+        if (isFinalized && !confirmFinalizedEdit) {
+          throw new HttpError(
+            409,
+            'This month is already finalized. Please confirm finalized reward modification with a reason.'
+          );
+        }
+        if (isFinalized && reason.length < 3) {
+          throw new HttpError(
+            400,
+            'Please provide a reason (at least 3 characters) when updating a finalized month.'
+          );
+        }
+
+        const nowIso = new Date().toISOString();
+        const logId = generateDocId('log');
+        const writes = [];
+
+        if (existingPeriod) {
+          writes.push(
+            buildReplaceUpdateWrite(
+              'leaderboardPeriods',
+              monthKey,
+              {
+                ...existingPeriod.data,
+                rewardsPublished,
+                announcementDate,
+                rewardNote,
+                rewards,
+                createdAt: preserveTimestamp(existingPeriod.raw, 'createdAt'),
+              },
+              existingPeriod.updateTime
+            )
+          );
+        } else {
+          writes.push(
+            buildCreateWrite(
+              'leaderboardPeriods',
+              monthKey,
+              {
+                monthKey,
+                status: 'open',
+                rewardsPublished,
+                announcementDate,
+                rewardNote,
+                rewards,
+                finalizedAt: '',
+                finalizedBy: '',
+                winnerCount: 0,
+                lastSyncedAt: nowIso,
+              },
+              ['createdAt', 'updatedAt']
+            )
+          );
+        }
+
+        if (isFinalized) {
+          const existingWinners = await queryByUserFieldRest(
+            'leaderboardWinners',
+            'monthKey',
+            monthKey,
+            admin.idToken
+          );
+          for (const wDoc of existingWinners) {
+            const r = Number(wDoc.data.rank);
+            const slot = rewards[r - 1];
+            const prizeTitle = slot && slot.enabled ? slot.prizeTitle : '';
+            const prizeDescription = slot && slot.enabled ? slot.prizeDescription : '';
+            const monetaryValue = slot && slot.enabled ? slot.monetaryValue : 0;
+            writes.push(
+              buildReplaceUpdateWrite(
+                'leaderboardWinners',
+                String(wDoc.data.winnerId),
+                {
+                  ...wDoc.data,
+                  prizeTitle,
+                  prizeDescription,
+                  monetaryValue,
+                  createdAt: preserveTimestamp(wDoc.raw, 'createdAt'),
+                },
+                wDoc.updateTime
+              )
+            );
+          }
+        }
+
+        const enabledCount = rewards.filter((r) => r.enabled).length;
+        writes.push(
+          buildCreateWrite(
+            'adminAuditLogs',
+            logId,
+            {
+              logId,
+              adminUid: admin.uid,
+              adminEmail: admin.email,
+              action: isFinalized
+                ? 'FINALIZED_LEADERBOARD_REWARDS_UPDATED'
+                : 'LEADERBOARD_REWARDS_UPDATED',
+              targetType: 'leaderboardPeriod',
+              targetId: monthKey,
+              summary: `Saved Best 10 rewards for ${monthKey} (${enabledCount} active positions, ${
+                rewardsPublished ? 'Published' : 'Draft'
+              })${reason ? ` · Reason: ${reason}` : ''}`.slice(0, 450),
+            },
+            ['createdAt']
+          )
+        );
+
+        await commitSingleOrBatchWrites(admin.idToken, writes);
+        res.json({ ok: true });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  // 11B. Recalculate / Reconcile Monthly Leaderboard from Verified Wallet Transactions
+  app.post(
+    '/api/admin/leaderboard/recalculate',
+    requireVerifiedAuth,
+    async (req: AuthedRequest, res: Response, next: NextFunction) => {
+      try {
+        const admin = req.authUser!;
+        await assertCallerIsAdmin(admin);
+
+        const monthKey = typeof req.body?.monthKey === 'string' ? req.body.monthKey.trim() : '';
+        if (!isValidMonthKey(monthKey)) {
+          throw new HttpError(400, 'Valid month key (YYYY-MM) is required.');
+        }
+
+        const silentAutoSync = Boolean(req.body?.silentAutoSync);
+        const confirmFinalizedOverride = Boolean(req.body?.confirmFinalizedOverride);
+        const reason =
+          typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 300) : '';
+
+        const existingPeriod = await getDocRest('leaderboardPeriods', monthKey, admin.idToken);
+        const isFinalized = existingPeriod?.data?.status === 'finalized';
+
+        if (isFinalized && silentAutoSync) {
+          res.json({ ok: true, skippedFinalized: true });
+          return;
+        }
+        if (isFinalized && !confirmFinalizedOverride) {
+          throw new HttpError(
+            409,
+            'This month is finalized. Explicit confirmation and reason are required to recalculate a finalized month.'
+          );
+        }
+        if (isFinalized && reason.length < 5) {
+          throw new HttpError(
+            400,
+            'Please provide a reason (at least 5 characters) when recalculating a finalized month.'
+          );
+        }
+
+        const [txDocs, userDocs, existingMonthEntries] = await Promise.all([
+          listCollectionRest<WalletTransaction>('transactions', admin.idToken, 4000),
+          listCollectionRest<UserProfile>('users', admin.idToken, 2000),
+          queryByUserFieldRest('monthlyMemberEarnings', 'monthKey', monthKey, admin.idToken),
+        ]);
+
+        const computed = computeMonthlyLeaderboardFromTransactions(
+          monthKey,
+          txDocs.map((d) => d.data),
+          userDocs.map((d) => d.data)
+        );
+
+        const existingByEntryId = new Map(
+          existingMonthEntries.map((d) => [String(d.data.entryId), d])
+        );
+        const activeEntryIds = new Set<string>();
+        const writes = [];
+        let changedCount = 0;
+
+        for (const stat of computed.allMemberStats) {
+          const entryId = buildMonthlyEntryId(monthKey, stat.userId);
+          activeEntryIds.add(entryId);
+          const prev = existingByEntryId.get(entryId);
+
+          if (prev) {
+            const unchanged =
+              Number(prev.data.eligibleEarnings) === stat.eligibleEarnings &&
+              Number(prev.data.approvedTaskCount) === stat.approvedTaskCount &&
+              Number(prev.data.reachedAtMs) === stat.reachedAtMs &&
+              prev.data.displayName === stat.displayName &&
+              prev.data.photoAssetId === stat.photoAssetId &&
+              prev.data.isEligibleMember === true;
+            if (!unchanged) {
+              changedCount++;
+              writes.push(
+                buildReplaceUpdateWrite(
+                  'monthlyMemberEarnings',
+                  entryId,
+                  {
+                    ...prev.data,
+                    displayName: stat.displayName,
+                    photoAssetId: stat.photoAssetId,
+                    isEligibleMember: true,
+                    eligibleEarnings: stat.eligibleEarnings,
+                    approvedTaskCount: stat.approvedTaskCount,
+                    reachedAtMs: stat.reachedAtMs,
+                    lastTransactionId: stat.lastTransactionId,
+                    lastSubmissionId: stat.lastSubmissionId,
+                    createdAt: preserveTimestamp(prev.raw, 'createdAt'),
+                  },
+                  prev.updateTime
+                )
+              );
+            }
+          } else {
+            changedCount++;
+            writes.push(
+              buildCreateWrite(
+                'monthlyMemberEarnings',
+                entryId,
+                {
+                  entryId,
+                  monthKey,
+                  userId: stat.userId,
+                  displayName: stat.displayName,
+                  photoAssetId: stat.photoAssetId,
+                  isEligibleMember: true,
+                  eligibleEarnings: stat.eligibleEarnings,
+                  approvedTaskCount: stat.approvedTaskCount,
+                  reachedAtMs: stat.reachedAtMs,
+                  lastTransactionId: stat.lastTransactionId,
+                  lastSubmissionId: stat.lastSubmissionId,
+                },
+                ['createdAt', 'updatedAt']
+              )
+            );
+          }
+        }
+
+        // Zero out any stale entry in this month that no longer has eligible earnings
+        for (const [entryId, prev] of existingByEntryId.entries()) {
+          if (!activeEntryIds.has(entryId) && Number(prev.data.eligibleEarnings || 0) > 0) {
+            changedCount++;
+            writes.push(
+              buildReplaceUpdateWrite(
+                'monthlyMemberEarnings',
+                entryId,
+                {
+                  ...prev.data,
+                  isEligibleMember: false,
+                  eligibleEarnings: 0,
+                  approvedTaskCount: 0,
+                  reachedAtMs: 0,
+                  lastTransactionId: 'admin_sync',
+                  lastSubmissionId: '',
+                  createdAt: preserveTimestamp(prev.raw, 'createdAt'),
+                },
+                prev.updateTime
+              )
+            );
+          }
+        }
+
+        const nowIso = new Date().toISOString();
+        const rewards = existingPeriod
+          ? normalizeRewardConfigs(existingPeriod.data.rewards)
+          : createEmptyRewardConfigs();
+
+        if (!silentAutoSync || changedCount > 0) {
+          if (existingPeriod) {
+            writes.push(
+              buildReplaceUpdateWrite(
+                'leaderboardPeriods',
+                monthKey,
+                {
+                  ...existingPeriod.data,
+                  winnerCount: isFinalized
+                    ? computed.top10.length
+                    : Number(existingPeriod.data.winnerCount || 0),
+                  lastSyncedAt: nowIso,
+                  createdAt: preserveTimestamp(existingPeriod.raw, 'createdAt'),
+                },
+                existingPeriod.updateTime
+              )
+            );
+          } else {
+            writes.push(
+              buildCreateWrite(
+                'leaderboardPeriods',
+                monthKey,
+                {
+                  monthKey,
+                  status: 'open',
+                  rewardsPublished: false,
+                  announcementDate: '',
+                  rewardNote: '',
+                  rewards,
+                  finalizedAt: '',
+                  finalizedBy: '',
+                  winnerCount: 0,
+                  lastSyncedAt: nowIso,
+                },
+                ['createdAt', 'updatedAt']
+              )
+            );
+          }
+        }
+
+        if (isFinalized && confirmFinalizedOverride) {
+          const [existingWinners, existingNotes] = await Promise.all([
+            queryByUserFieldRest('leaderboardWinners', 'monthKey', monthKey, admin.idToken),
+            queryByUserFieldRest('leaderboardAdminNotes', 'monthKey', monthKey, admin.idToken),
+          ]);
+          const winById = new Map(existingWinners.map((w) => [String(w.data.winnerId), w]));
+          const noteById = new Map(existingNotes.map((n) => [String(n.data.winnerId), n]));
+
+          for (const row of computed.top10) {
+            const winnerId = buildWinnerDocId(monthKey, row.rank);
+            const slot = rewards[row.rank - 1];
+            const prevWin = winById.get(winnerId);
+            const prevNote = noteById.get(winnerId);
+            const sameWinner = prevWin && prevWin.data.userId === row.userId;
+
+            const winPayload = {
+              winnerId,
+              monthKey,
+              rank: row.rank,
+              userId: row.userId,
+              displayName: row.displayName,
+              photoAssetId: row.photoAssetId,
+              eligibleEarnings: row.eligibleEarnings,
+              approvedTaskCount: row.approvedTaskCount,
+              reachedAtMs: row.reachedAtMs,
+              prizeTitle: slot && slot.enabled ? slot.prizeTitle : '',
+              prizeDescription: slot && slot.enabled ? slot.prizeDescription : '',
+              monetaryValue: slot && slot.enabled ? slot.monetaryValue : 0,
+              rewardStatus: sameWinner ? String(prevWin.data.rewardStatus) : 'pending',
+              deliveredAt: sameWinner ? String(prevWin.data.deliveredAt || '') : '',
+            };
+
+            if (prevWin) {
+              writes.push(
+                buildReplaceUpdateWrite(
+                  'leaderboardWinners',
+                  winnerId,
+                  { ...winPayload, createdAt: preserveTimestamp(prevWin.raw, 'createdAt') },
+                  prevWin.updateTime
+                )
+              );
+            } else {
+              writes.push(
+                buildCreateWrite('leaderboardWinners', winnerId, winPayload, [
+                  'createdAt',
+                  'updatedAt',
+                ])
+              );
+            }
+
+            const notePayload = {
+              winnerId,
+              monthKey,
+              rank: row.rank,
+              userId: row.userId,
+              memberId: row.memberId,
+              adminNote:
+                prevNote && prevNote.data.userId === row.userId
+                  ? String(prevNote.data.adminNote || '')
+                  : '',
+              updatedBy: admin.uid,
+            };
+            if (prevNote) {
+              writes.push(
+                buildReplaceUpdateWrite(
+                  'leaderboardAdminNotes',
+                  winnerId,
+                  { ...notePayload, createdAt: preserveTimestamp(prevNote.raw, 'createdAt') },
+                  prevNote.updateTime
+                )
+              );
+            } else {
+              writes.push(
+                buildCreateWrite('leaderboardAdminNotes', winnerId, notePayload, [
+                  'createdAt',
+                  'updatedAt',
+                ])
+              );
+            }
+          }
+
+          for (let r = computed.top10.length + 1; r <= 10; r++) {
+            const staleId = buildWinnerDocId(monthKey, r);
+            if (winById.has(staleId)) {
+              writes.push(buildDeleteWrite('leaderboardWinners', staleId));
+            }
+            if (noteById.has(staleId)) {
+              writes.push(buildDeleteWrite('leaderboardAdminNotes', staleId));
+            }
+          }
+        }
+
+        if (!silentAutoSync || changedCount > 0) {
+          const logId = generateDocId('log');
+          writes.push(
+            buildCreateWrite(
+              'adminAuditLogs',
+              logId,
+              {
+                logId,
+                adminUid: admin.uid,
+                adminEmail: admin.email,
+                action: isFinalized
+                  ? 'FINALIZED_LEADERBOARD_RECALCULATED'
+                  : 'LEADERBOARD_RECALCULATED',
+                targetType: 'leaderboardPeriod',
+                targetId: monthKey,
+                summary: `Recalculated Best 10 for ${monthKey} from verified ledger (${
+                  computed.allMemberStats.length
+                } eligible earners, ${changedCount} updated)${
+                  reason ? ` · Reason: ${reason}` : ''
+                }`.slice(0, 450),
+              },
+              ['createdAt']
+            )
+          );
+        }
+
+        if (writes.length > 0) {
+          await commitSingleOrBatchWrites(admin.idToken, writes);
+        }
+
+        res.json({
+          ok: true,
+          changedCount,
+          eligibleMemberCount: computed.allMemberStats.length,
+        });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  // 11C. Reverse / Invalidate an Erroneous Task Earning & Recalculate Monthly Leaderboard
+  app.post(
+    '/api/admin/leaderboard/reverse-earning',
+    requireVerifiedAuth,
+    async (req: AuthedRequest, res: Response, next: NextFunction) => {
+      try {
+        const admin = req.authUser!;
+        await assertCallerIsAdmin(admin);
+
+        const transactionId =
+          typeof req.body?.transactionId === 'string' ? req.body.transactionId.trim() : '';
+        const reason =
+          typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 300) : '';
+        const confirmFinalizedOverride = Boolean(req.body?.confirmFinalizedOverride);
+
+        if (!VALID_ID_REGEX.test(transactionId)) {
+          throw new HttpError(400, 'Valid transaction ID is required.');
+        }
+        if (reason.length < 5) {
+          throw new HttpError(
+            400,
+            'Please provide a clear reversal reason (at least 5 characters) for the audit log.'
+          );
+        }
+
+        const targetTx = await getDocRest<WalletTransaction>(
+          'transactions',
+          transactionId,
+          admin.idToken
+        );
+        if (!targetTx) {
+          throw new HttpError(404, 'Target earning transaction not found.');
+        }
+        if (
+          (targetTx.data.type !== 'task_reward' &&
+            targetTx.data.type !== 'custom_task_reward') ||
+          targetTx.data.direction !== 'credit'
+        ) {
+          throw new HttpError(400, 'Only approved task reward credits can be reversed.');
+        }
+
+        const refId = String(targetTx.data.referenceId);
+        const reversalTxId = `tx_reversal_${refId}`;
+        const existingReversal = await getDocRest('transactions', reversalTxId, admin.idToken);
+        if (existingReversal) {
+          throw new HttpError(409, 'This earning transaction has already been reversed.');
+        }
+
+        const txMs =
+          extractTimestampMs(targetTx.data.approvedAt) ||
+          extractTimestampMs(targetTx.data.createdAt);
+        const monthKey = getDhakaMonthKey(txMs);
+        const existingPeriod = await getDocRest('leaderboardPeriods', monthKey, admin.idToken);
+        const isFinalized = existingPeriod?.data?.status === 'finalized';
+
+        if (isFinalized && !confirmFinalizedOverride) {
+          throw new HttpError(
+            409,
+            `Month ${monthKey} is finalized. Confirm finalized month override to reverse this earning.`
+          );
+        }
+
+        const memberUid = String(targetTx.data.userId);
+        const amount = Number(targetTx.data.amount);
+        const nowIso = new Date().toISOString();
+
+        // Execute atomic wallet deduction + reversal ledger record
+        await runAtomicTransaction(admin.idToken, async (tx) => {
+          const revCheck = await tx.get('transactions', reversalTxId);
+          if (revCheck) {
+            throw new HttpError(409, 'This earning transaction has already been reversed.');
+          }
+
+          const [wallet, profile] = await Promise.all([
+            tx.get('wallets', memberUid),
+            tx.get('users', memberUid),
+          ]);
+          if (!wallet) {
+            throw new HttpError(404, 'Member wallet not found.');
+          }
+          const prevAvail = Number(wallet.data.availableBalance || 0);
+          if (prevAvail < amount) {
+            throw new HttpError(
+              400,
+              `Cannot deduct ৳${amount} automatically because member currently has only ৳${prevAvail} available wallet balance.`
+            );
+          }
+
+          const writes = [
+            buildReplaceUpdateWrite(
+              'wallets',
+              memberUid,
+              {
+                ...wallet.data,
+                availableBalance: prevAvail - amount,
+                totalEarnings: Math.max(0, Number(wallet.data.totalEarnings || 0) - amount),
+                createdAt: preserveTimestamp(wallet.raw, 'createdAt'),
+              },
+              wallet.updateTime
+            ),
+            buildCreateWrite(
+              'transactions',
+              reversalTxId,
+              {
+                transactionId: reversalTxId,
+                userId: memberUid,
+                memberId: String(targetTx.data.memberId),
+                type: 'earning_reversal',
+                amount,
+                feeAmount: 0,
+                netAmount: amount,
+                direction: 'debit',
+                description: `Admin reversed task earning (${
+                  targetTx.data.taskName || refId
+                }): -৳${amount} · Reason: ${reason}`.slice(0, 900),
+                referenceId: refId,
+                taskName: String(targetTx.data.taskName || ''),
+                submissionId: String(targetTx.data.submissionId || refId),
+                approvedAt: nowIso,
+              },
+              ['createdAt']
+            ),
+          ];
+
+          if (profile) {
+            writes.push(
+              buildReplaceUpdateWrite(
+                'users',
+                memberUid,
+                {
+                  ...profile.data,
+                  completedTasksCount: Math.max(
+                    0,
+                    Number(profile.data.completedTasksCount || 0) - 1
+                  ),
+                  totalEarnings: Math.max(0, Number(profile.data.totalEarnings || 0) - amount),
+                  createdAt: preserveTimestamp(profile.raw, 'createdAt'),
+                },
+                profile.updateTime
+              )
+            );
+          }
+
+          const notifId = generateDocId('ntf');
+          const logId = generateDocId('log');
+          writes.push(
+            buildCreateWrite(
+              'notifications',
+              notifId,
+              {
+                notificationId: notifId,
+                userId: memberUid,
+                type: 'earning_reversed',
+                title: 'Task Earning Reversed',
+                message: `৳${amount} from "${
+                  targetTx.data.taskName || refId
+                }" was reversed by Admin. Reason: ${reason}`.slice(0, 900),
+                referenceId: refId,
+                isRead: false,
+              },
+              ['createdAt', 'updatedAt']
+            ),
+            buildCreateWrite(
+              'adminAuditLogs',
+              logId,
+              {
+                logId,
+                adminUid: admin.uid,
+                adminEmail: admin.email,
+                action: 'EARNING_REVERSED',
+                targetType: 'transaction',
+                targetId: reversalTxId,
+                summary: `Reversed ৳${amount} earning (${transactionId}) for ${targetTx.data.memberId} in ${monthKey} · Reason: ${reason}`.slice(
+                  0,
+                  450
+                ),
+              },
+              ['createdAt']
+            )
+          );
+
+          return { writes, result: true };
+        });
+
+        // Immediately recalculate the affected member's monthly leaderboard entry (and finalized snapshot if overridden)
+        const [txDocs, userDocs, existingEntry] = await Promise.all([
+          listCollectionRest<WalletTransaction>('transactions', admin.idToken, 4000),
+          listCollectionRest<UserProfile>('users', admin.idToken, 2000),
+          getDocRest('monthlyMemberEarnings', buildMonthlyEntryId(monthKey, memberUid), admin.idToken),
+        ]);
+
+        const computed = computeMonthlyLeaderboardFromTransactions(
+          monthKey,
+          txDocs.map((d) => d.data),
+          userDocs.map((d) => d.data)
+        );
+        const updatedStat = computed.allMemberStats.find((s) => s.userId === memberUid);
+        const entryId = buildMonthlyEntryId(monthKey, memberUid);
+        const syncWrites = [];
+
+        if (existingEntry) {
+          syncWrites.push(
+            buildReplaceUpdateWrite(
+              'monthlyMemberEarnings',
+              entryId,
+              {
+                ...existingEntry.data,
+                isEligibleMember: Boolean(updatedStat),
+                eligibleEarnings: updatedStat ? updatedStat.eligibleEarnings : 0,
+                approvedTaskCount: updatedStat ? updatedStat.approvedTaskCount : 0,
+                reachedAtMs: updatedStat ? updatedStat.reachedAtMs : 0,
+                lastTransactionId: updatedStat ? updatedStat.lastTransactionId : reversalTxId,
+                lastSubmissionId: updatedStat ? updatedStat.lastSubmissionId : refId,
+                createdAt: preserveTimestamp(existingEntry.raw, 'createdAt'),
+              },
+              existingEntry.updateTime
+            )
+          );
+        }
+
+        if (isFinalized && confirmFinalizedOverride && existingPeriod) {
+          const rewards = normalizeRewardConfigs(existingPeriod.data.rewards);
+          const [existingWinners, existingNotes] = await Promise.all([
+            queryByUserFieldRest('leaderboardWinners', 'monthKey', monthKey, admin.idToken),
+            queryByUserFieldRest('leaderboardAdminNotes', 'monthKey', monthKey, admin.idToken),
+          ]);
+          const winById = new Map(existingWinners.map((w) => [String(w.data.winnerId), w]));
+          const noteById = new Map(existingNotes.map((n) => [String(n.data.winnerId), n]));
+
+          syncWrites.push(
+            buildReplaceUpdateWrite(
+              'leaderboardPeriods',
+              monthKey,
+              {
+                ...existingPeriod.data,
+                winnerCount: computed.top10.length,
+                lastSyncedAt: nowIso,
+                createdAt: preserveTimestamp(existingPeriod.raw, 'createdAt'),
+              },
+              existingPeriod.updateTime
+            )
+          );
+
+          for (const row of computed.top10) {
+            const winnerId = buildWinnerDocId(monthKey, row.rank);
+            const slot = rewards[row.rank - 1];
+            const prevWin = winById.get(winnerId);
+            const prevNote = noteById.get(winnerId);
+            const sameWinner = prevWin && prevWin.data.userId === row.userId;
+
+            const winPayload = {
+              winnerId,
+              monthKey,
+              rank: row.rank,
+              userId: row.userId,
+              displayName: row.displayName,
+              photoAssetId: row.photoAssetId,
+              eligibleEarnings: row.eligibleEarnings,
+              approvedTaskCount: row.approvedTaskCount,
+              reachedAtMs: row.reachedAtMs,
+              prizeTitle: slot && slot.enabled ? slot.prizeTitle : '',
+              prizeDescription: slot && slot.enabled ? slot.prizeDescription : '',
+              monetaryValue: slot && slot.enabled ? slot.monetaryValue : 0,
+              rewardStatus: sameWinner ? String(prevWin.data.rewardStatus) : 'pending',
+              deliveredAt: sameWinner ? String(prevWin.data.deliveredAt || '') : '',
+            };
+            if (prevWin) {
+              syncWrites.push(
+                buildReplaceUpdateWrite(
+                  'leaderboardWinners',
+                  winnerId,
+                  { ...winPayload, createdAt: preserveTimestamp(prevWin.raw, 'createdAt') },
+                  prevWin.updateTime
+                )
+              );
+            } else {
+              syncWrites.push(
+                buildCreateWrite('leaderboardWinners', winnerId, winPayload, [
+                  'createdAt',
+                  'updatedAt',
+                ])
+              );
+            }
+
+            const notePayload = {
+              winnerId,
+              monthKey,
+              rank: row.rank,
+              userId: row.userId,
+              memberId: row.memberId,
+              adminNote:
+                prevNote && prevNote.data.userId === row.userId
+                  ? String(prevNote.data.adminNote || '')
+                  : '',
+              updatedBy: admin.uid,
+            };
+            if (prevNote) {
+              syncWrites.push(
+                buildReplaceUpdateWrite(
+                  'leaderboardAdminNotes',
+                  winnerId,
+                  { ...notePayload, createdAt: preserveTimestamp(prevNote.raw, 'createdAt') },
+                  prevNote.updateTime
+                )
+              );
+            } else {
+              syncWrites.push(
+                buildCreateWrite('leaderboardAdminNotes', winnerId, notePayload, [
+                  'createdAt',
+                  'updatedAt',
+                ])
+              );
+            }
+          }
+
+          for (let r = computed.top10.length + 1; r <= 10; r++) {
+            const staleId = buildWinnerDocId(monthKey, r);
+            if (winById.has(staleId)) syncWrites.push(buildDeleteWrite('leaderboardWinners', staleId));
+            if (noteById.has(staleId)) syncWrites.push(buildDeleteWrite('leaderboardAdminNotes', staleId));
+          }
+        }
+
+        if (syncWrites.length > 0) {
+          await commitSingleOrBatchWrites(admin.idToken, syncWrites);
+        }
+
+        res.json({ ok: true, reversalTransactionId: reversalTxId, monthKey });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  // 11D. Finalize Monthly Leaderboard & Lock Archived Winners Snapshot
+  app.post(
+    '/api/admin/leaderboard/finalize',
+    requireVerifiedAuth,
+    async (req: AuthedRequest, res: Response, next: NextFunction) => {
+      try {
+        const admin = req.authUser!;
+        await assertCallerIsAdmin(admin);
+
+        const monthKey = typeof req.body?.monthKey === 'string' ? req.body.monthKey.trim() : '';
+        if (!isValidMonthKey(monthKey)) {
+          throw new HttpError(400, 'Valid month key (YYYY-MM) is required.');
+        }
+        const confirmReFinalize = Boolean(req.body?.confirmReFinalize);
+        const note = typeof req.body?.note === 'string' ? req.body.note.trim().slice(0, 300) : '';
+
+        const existingPeriod = await getDocRest('leaderboardPeriods', monthKey, admin.idToken);
+        if (existingPeriod?.data?.status === 'finalized' && !confirmReFinalize) {
+          throw new HttpError(
+            409,
+            'This month is already finalized. Confirm re-finalization if you intend to refresh the archived snapshot.'
+          );
+        }
+        if (existingPeriod?.data?.status === 'finalized' && note.length < 3) {
+          throw new HttpError(
+            400,
+            'Please provide a reason (at least 3 characters) when re-finalizing an archived month.'
+          );
+        }
+
+        const [txDocs, userDocs, existingMonthEntries, existingWinners, existingNotes] =
+          await Promise.all([
+            listCollectionRest<WalletTransaction>('transactions', admin.idToken, 4000),
+            listCollectionRest<UserProfile>('users', admin.idToken, 2000),
+            queryByUserFieldRest('monthlyMemberEarnings', 'monthKey', monthKey, admin.idToken),
+            queryByUserFieldRest('leaderboardWinners', 'monthKey', monthKey, admin.idToken),
+            queryByUserFieldRest('leaderboardAdminNotes', 'monthKey', monthKey, admin.idToken),
+          ]);
+
+        const computed = computeMonthlyLeaderboardFromTransactions(
+          monthKey,
+          txDocs.map((d) => d.data),
+          userDocs.map((d) => d.data)
+        );
+
+        const rewards = existingPeriod
+          ? normalizeRewardConfigs(existingPeriod.data.rewards)
+          : createEmptyRewardConfigs();
+        const nowIso = new Date().toISOString();
+        const writes = [];
+
+        // Sync monthlyMemberEarnings so live & finalized projections match 100%
+        const existingByEntryId = new Map(
+          existingMonthEntries.map((d) => [String(d.data.entryId), d])
+        );
+        const activeEntryIds = new Set<string>();
+        for (const stat of computed.allMemberStats) {
+          const entryId = buildMonthlyEntryId(monthKey, stat.userId);
+          activeEntryIds.add(entryId);
+          const prev = existingByEntryId.get(entryId);
+          if (prev) {
+            writes.push(
+              buildReplaceUpdateWrite(
+                'monthlyMemberEarnings',
+                entryId,
+                {
+                  ...prev.data,
+                  displayName: stat.displayName,
+                  photoAssetId: stat.photoAssetId,
+                  isEligibleMember: true,
+                  eligibleEarnings: stat.eligibleEarnings,
+                  approvedTaskCount: stat.approvedTaskCount,
+                  reachedAtMs: stat.reachedAtMs,
+                  lastTransactionId: stat.lastTransactionId,
+                  lastSubmissionId: stat.lastSubmissionId,
+                  createdAt: preserveTimestamp(prev.raw, 'createdAt'),
+                },
+                prev.updateTime
+              )
+            );
+          } else {
+            writes.push(
+              buildCreateWrite(
+                'monthlyMemberEarnings',
+                entryId,
+                {
+                  entryId,
+                  monthKey,
+                  userId: stat.userId,
+                  displayName: stat.displayName,
+                  photoAssetId: stat.photoAssetId,
+                  isEligibleMember: true,
+                  eligibleEarnings: stat.eligibleEarnings,
+                  approvedTaskCount: stat.approvedTaskCount,
+                  reachedAtMs: stat.reachedAtMs,
+                  lastTransactionId: stat.lastTransactionId,
+                  lastSubmissionId: stat.lastSubmissionId,
+                },
+                ['createdAt', 'updatedAt']
+              )
+            );
+          }
+        }
+        for (const [entryId, prev] of existingByEntryId.entries()) {
+          if (!activeEntryIds.has(entryId) && Number(prev.data.eligibleEarnings || 0) > 0) {
+            writes.push(
+              buildReplaceUpdateWrite(
+                'monthlyMemberEarnings',
+                entryId,
+                {
+                  ...prev.data,
+                  isEligibleMember: false,
+                  eligibleEarnings: 0,
+                  approvedTaskCount: 0,
+                  reachedAtMs: 0,
+                  lastTransactionId: 'admin_sync',
+                  lastSubmissionId: '',
+                  createdAt: preserveTimestamp(prev.raw, 'createdAt'),
+                },
+                prev.updateTime
+              )
+            );
+          }
+        }
+
+        // Write finalized period status
+        if (existingPeriod) {
+          writes.push(
+            buildReplaceUpdateWrite(
+              'leaderboardPeriods',
+              monthKey,
+              {
+                ...existingPeriod.data,
+                status: 'finalized',
+                finalizedAt: nowIso,
+                finalizedBy: admin.uid,
+                winnerCount: computed.top10.length,
+                lastSyncedAt: nowIso,
+                createdAt: preserveTimestamp(existingPeriod.raw, 'createdAt'),
+              },
+              existingPeriod.updateTime
+            )
+          );
+        } else {
+          writes.push(
+            buildCreateWrite(
+              'leaderboardPeriods',
+              monthKey,
+              {
+                monthKey,
+                status: 'finalized',
+                rewardsPublished: false,
+                announcementDate: '',
+                rewardNote: '',
+                rewards,
+                finalizedAt: nowIso,
+                finalizedBy: admin.uid,
+                winnerCount: computed.top10.length,
+                lastSyncedAt: nowIso,
+              },
+              ['createdAt', 'updatedAt']
+            )
+          );
+        }
+
+        // Write Top 10 winner records + private admin fulfillment metadata
+        const winById = new Map(existingWinners.map((w) => [String(w.data.winnerId), w]));
+        const noteById = new Map(existingNotes.map((n) => [String(n.data.winnerId), n]));
+
+        for (const row of computed.top10) {
+          const winnerId = buildWinnerDocId(monthKey, row.rank);
+          const slot = rewards[row.rank - 1];
+          const prevWin = winById.get(winnerId);
+          const prevNote = noteById.get(winnerId);
+          const sameWinner = prevWin && prevWin.data.userId === row.userId;
+
+          const winPayload = {
+            winnerId,
+            monthKey,
+            rank: row.rank,
+            userId: row.userId,
+            displayName: row.displayName,
+            photoAssetId: row.photoAssetId,
+            eligibleEarnings: row.eligibleEarnings,
+            approvedTaskCount: row.approvedTaskCount,
+            reachedAtMs: row.reachedAtMs,
+            prizeTitle: slot && slot.enabled ? slot.prizeTitle : '',
+            prizeDescription: slot && slot.enabled ? slot.prizeDescription : '',
+            monetaryValue: slot && slot.enabled ? slot.monetaryValue : 0,
+            rewardStatus: sameWinner ? String(prevWin.data.rewardStatus) : 'pending',
+            deliveredAt: sameWinner ? String(prevWin.data.deliveredAt || '') : '',
+          };
+
+          if (prevWin) {
+            writes.push(
+              buildReplaceUpdateWrite(
+                'leaderboardWinners',
+                winnerId,
+                { ...winPayload, createdAt: preserveTimestamp(prevWin.raw, 'createdAt') },
+                prevWin.updateTime
+              )
+            );
+          } else {
+            writes.push(
+              buildCreateWrite('leaderboardWinners', winnerId, winPayload, [
+                'createdAt',
+                'updatedAt',
+              ])
+            );
+          }
+
+          const notePayload = {
+            winnerId,
+            monthKey,
+            rank: row.rank,
+            userId: row.userId,
+            memberId: row.memberId,
+            adminNote:
+              prevNote && prevNote.data.userId === row.userId
+                ? String(prevNote.data.adminNote || '')
+                : '',
+            updatedBy: admin.uid,
+          };
+
+          if (prevNote) {
+            writes.push(
+              buildReplaceUpdateWrite(
+                'leaderboardAdminNotes',
+                winnerId,
+                { ...notePayload, createdAt: preserveTimestamp(prevNote.raw, 'createdAt') },
+                prevNote.updateTime
+              )
+            );
+          } else {
+            writes.push(
+              buildCreateWrite('leaderboardAdminNotes', winnerId, notePayload, [
+                'createdAt',
+                'updatedAt',
+              ])
+            );
+          }
+        }
+
+        for (let r = computed.top10.length + 1; r <= 10; r++) {
+          const staleId = buildWinnerDocId(monthKey, r);
+          if (winById.has(staleId)) writes.push(buildDeleteWrite('leaderboardWinners', staleId));
+          if (noteById.has(staleId)) writes.push(buildDeleteWrite('leaderboardAdminNotes', staleId));
+        }
+
+        const logId = generateDocId('log');
+        writes.push(
+          buildCreateWrite(
+            'adminAuditLogs',
+            logId,
+            {
+              logId,
+              adminUid: admin.uid,
+              adminEmail: admin.email,
+              action: confirmReFinalize
+                ? 'LEADERBOARD_MONTH_REFINALIZED'
+                : 'LEADERBOARD_MONTH_FINALIZED',
+              targetType: 'leaderboardPeriod',
+              targetId: monthKey,
+              summary: `Finalized Best 10 month ${monthKey} with ${computed.top10.length} archived winners${
+                note ? ` · Note: ${note}` : ''
+              }`.slice(0, 450),
+            },
+            ['createdAt']
+          )
+        );
+
+        await commitSingleOrBatchWrites(admin.idToken, writes);
+        res.json({ ok: true, winnerCount: computed.top10.length });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  // 11E. Update Winner Reward Fulfillment Status & Delivery Record
+  app.post(
+    '/api/admin/leaderboard/winners/:winnerId/status',
+    requireVerifiedAuth,
+    async (req: AuthedRequest, res: Response, next: NextFunction) => {
+      try {
+        const admin = req.authUser!;
+        await assertCallerIsAdmin(admin);
+
+        const winnerId = String(req.params.winnerId || '');
+        if (!/^[0-9]{4}-(0[1-9]|1[0-2])_(0[1-9]|10)$/.test(winnerId)) {
+          throw new HttpError(400, 'Invalid winner record ID.');
+        }
+
+        const rewardStatus = req.body?.rewardStatus;
+        if (
+          rewardStatus !== 'pending' &&
+          rewardStatus !== 'approved' &&
+          rewardStatus !== 'awarded' &&
+          rewardStatus !== 'cancelled'
+        ) {
+          throw new HttpError(400, 'Invalid reward status.');
+        }
+
+        const rawDeliveredAt =
+          typeof req.body?.deliveredAt === 'string' ? req.body.deliveredAt.trim().slice(0, 40) : '';
+        const adminNote =
+          typeof req.body?.adminNote === 'string' ? req.body.adminNote.trim().slice(0, 1000) : '';
+        const notifyWinner = req.body?.notifyWinner !== false;
+        const nowIso = new Date().toISOString();
+
+        await runAtomicTransaction(admin.idToken, async (tx) => {
+          const winnerDoc = await tx.get('leaderboardWinners', winnerId);
+          if (!winnerDoc) {
+            throw new HttpError(404, 'Finalized winner record not found.');
+          }
+
+          const noteDoc = await tx.get('leaderboardAdminNotes', winnerId);
+          const userDoc = await tx.get('users', String(winnerDoc.data.userId));
+          const memberCode = String(
+            noteDoc?.data?.memberId || userDoc?.data?.memberId || 'MTS-000000'
+          );
+
+          const deliveredAt =
+            rewardStatus === 'awarded'
+              ? rawDeliveredAt || String(winnerDoc.data.deliveredAt || '') || nowIso
+              : rewardStatus === 'cancelled' || rewardStatus === 'pending'
+              ? ''
+              : rawDeliveredAt;
+
+          const writes = [
+            buildReplaceUpdateWrite(
+              'leaderboardWinners',
+              winnerId,
+              {
+                ...winnerDoc.data,
+                rewardStatus,
+                deliveredAt,
+                createdAt: preserveTimestamp(winnerDoc.raw, 'createdAt'),
+              },
+              winnerDoc.updateTime
+            ),
+          ];
+
+          const notePayload = {
+            winnerId,
+            monthKey: String(winnerDoc.data.monthKey),
+            rank: Number(winnerDoc.data.rank),
+            userId: String(winnerDoc.data.userId),
+            memberId: memberCode,
+            adminNote,
+            updatedBy: admin.uid,
+          };
+
+          if (noteDoc) {
+            writes.push(
+              buildReplaceUpdateWrite(
+                'leaderboardAdminNotes',
+                winnerId,
+                { ...notePayload, createdAt: preserveTimestamp(noteDoc.raw, 'createdAt') },
+                noteDoc.updateTime
+              )
+            );
+          } else {
+            writes.push(
+              buildCreateWrite('leaderboardAdminNotes', winnerId, notePayload, [
+                'createdAt',
+                'updatedAt',
+              ])
+            );
+          }
+
+          if (
+            rewardStatus === 'awarded' &&
+            notifyWinner &&
+            winnerDoc.data.rewardStatus !== 'awarded'
+          ) {
+            const notifId = generateDocId('ntf');
+            const prizeText = String(winnerDoc.data.prizeTitle || 'Monthly Best 10 Prize');
+            writes.push(
+              buildCreateWrite(
+                'notifications',
+                notifId,
+                {
+                  notificationId: notifId,
+                  userId: String(winnerDoc.data.userId),
+                  type: 'leaderboard_reward',
+                  title: `Best 10 Rank #${winnerDoc.data.rank} Reward Delivered!`,
+                  message: `Congratulations! Your ${winnerDoc.data.monthKey} Best 10 reward (${prizeText}) has been marked as Awarded.`.slice(
+                    0,
+                    900
+                  ),
+                  referenceId: winnerId,
+                  isRead: false,
+                },
+                ['createdAt', 'updatedAt']
+              )
+            );
+          }
+
+          const logId = generateDocId('log');
+          writes.push(
+            buildCreateWrite(
+              'adminAuditLogs',
+              logId,
+              {
+                logId,
+                adminUid: admin.uid,
+                adminEmail: admin.email,
+                action: 'LEADERBOARD_REWARD_STATUS_UPDATED',
+                targetType: 'leaderboardWinner',
+                targetId: winnerId,
+                summary: `Updated ${winnerDoc.data.monthKey} Rank #${winnerDoc.data.rank} (${memberCode}) reward status to ${rewardStatus}${
+                  adminNote ? ` · Note: ${adminNote}` : ''
+                }`.slice(0, 450),
+              },
+              ['createdAt']
+            )
+          );
+
+          return { writes, result: true };
+        });
+
+        res.json({ ok: true });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
   // Express Error Handler for API routes
   app.use('/api', (err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof HttpError) {
@@ -2312,8 +3708,24 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(distPath));
+    app.use(
+      express.static(distPath, {
+        setHeaders(res, filePath) {
+          const base = path.basename(filePath);
+          if (
+            base === 'index.html' ||
+            base === 'sw.js' ||
+            base === 'registerSW.js' ||
+            base === 'manifest.webmanifest' ||
+            base.startsWith('workbox-')
+          ) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          }
+        },
+      })
+    );
     app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

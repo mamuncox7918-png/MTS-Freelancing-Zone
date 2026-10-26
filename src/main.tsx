@@ -12,15 +12,30 @@ if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
   });
 }
 
-registerSW({
+const updateSW = registerSW({
   immediate: true,
+  onNeedRefresh() {
+    void updateSW(true);
+  },
   onRegisteredSW(_swUrl, registration) {
     if (!registration) return;
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') {
+    // Check immediately when the installed PWA launches
+    void registration.update();
+
+    const checkForAppUpdate = () => {
+      if (navigator.onLine) {
         void registration.update();
       }
+    };
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        checkForAppUpdate();
+      }
     });
+    window.addEventListener('focus', checkForAppUpdate);
+    window.addEventListener('online', checkForAppUpdate);
+    window.setInterval(checkForAppUpdate, 60 * 1000);
   },
 });
 

@@ -238,7 +238,10 @@ service cloud.firestore {
         ]) &&
         isValidId(data.notificationId) &&
         isValidId(data.userId) &&
-        data.type is string && data.type.size() <= 30 && data.type in ['custom_task_approved', 'custom_task_rejected', 'task_approved', 'task_rejected'] &&
+        data.type is string && data.type.size() <= 30 && data.type in [
+          'custom_task_approved', 'custom_task_rejected', 'task_approved', 'task_rejected',
+          'earning_reversed', 'leaderboard_reward'
+        ] &&
         data.title is string && data.title.size() >= 3 && data.title.size() <= 200 &&
         data.message is string && data.message.size() >= 3 && data.message.size() <= 1000 &&
         isValidId(data.referenceId) &&
@@ -291,7 +294,10 @@ service cloud.firestore {
         isValidId(data.transactionId) &&
         isValidId(data.userId) &&
         data.memberId is string && data.memberId.size() >= 6 && data.memberId.size() <= 20 &&
-        data.type is string && data.type.size() <= 30 && data.type in ['task_reward', 'custom_task_reward', 'withdrawal_request', 'withdrawal_paid', 'withdrawal_refund'] &&
+        data.type is string && data.type.size() <= 30 && data.type in [
+          'task_reward', 'custom_task_reward', 'earning_reversal',
+          'withdrawal_request', 'withdrawal_paid', 'withdrawal_refund'
+        ] &&
         data.amount is number && data.amount > 0 &&
         data.feeAmount is number && data.feeAmount >= 0 &&
         data.netAmount is number && data.netAmount > 0 &&
@@ -383,8 +389,144 @@ service cloud.firestore {
         data.createdAt is timestamp;
     }
 
+    function isValidMonthKeyString(mk) {
+      return mk is string && mk.size() == 7 && mk.matches('^[0-9]{4}-(0[1-9]|1[0-2])$');
+    }
+
+    function isValidMonthlyMemberEarning(data) {
+      return data.keys().hasAll([
+          'entryId', 'monthKey', 'userId', 'displayName', 'photoAssetId',
+          'isEligibleMember', 'eligibleEarnings', 'approvedTaskCount',
+          'reachedAtMs', 'lastTransactionId', 'lastSubmissionId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'entryId', 'monthKey', 'userId', 'displayName', 'photoAssetId',
+          'isEligibleMember', 'eligibleEarnings', 'approvedTaskCount',
+          'reachedAtMs', 'lastTransactionId', 'lastSubmissionId', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.entryId) &&
+        isValidMonthKeyString(data.monthKey) &&
+        isValidId(data.userId) &&
+        data.entryId == data.monthKey + '_' + data.userId &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 300 &&
+        data.photoAssetId is string && data.photoAssetId.size() <= 128 &&
+        (data.photoAssetId == '' || isValidId(data.photoAssetId)) &&
+        data.isEligibleMember is bool &&
+        data.eligibleEarnings is number && data.eligibleEarnings >= 0 && data.eligibleEarnings <= 100000000 &&
+        data.approvedTaskCount is number && data.approvedTaskCount >= 0 && data.approvedTaskCount <= 1000000 &&
+        data.reachedAtMs is number && data.reachedAtMs >= 0 &&
+        isValidId(data.lastTransactionId) &&
+        data.lastSubmissionId is string && data.lastSubmissionId.size() <= 128 &&
+        (data.lastSubmissionId == '' || isValidId(data.lastSubmissionId)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidRewardSlot(slot, expectedRank) {
+      return slot is map &&
+        slot.keys().hasAll(['rank', 'prizeTitle', 'prizeDescription', 'monetaryValue', 'enabled']) &&
+        slot.keys().hasOnly(['rank', 'prizeTitle', 'prizeDescription', 'monetaryValue', 'enabled']) &&
+        slot.rank is number && slot.rank == expectedRank &&
+        slot.prizeTitle is string && slot.prizeTitle.size() <= 160 &&
+        slot.prizeDescription is string && slot.prizeDescription.size() <= 500 &&
+        slot.monetaryValue is number && slot.monetaryValue >= 0 && slot.monetaryValue <= 10000000 &&
+        slot.enabled is bool;
+    }
+
+    function isValidLeaderboardPeriod(data) {
+      return data.keys().hasAll([
+          'monthKey', 'status', 'rewardsPublished', 'announcementDate', 'rewardNote',
+          'rewards', 'finalizedAt', 'finalizedBy', 'winnerCount', 'lastSyncedAt',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'monthKey', 'status', 'rewardsPublished', 'announcementDate', 'rewardNote',
+          'rewards', 'finalizedAt', 'finalizedBy', 'winnerCount', 'lastSyncedAt',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isValidMonthKeyString(data.monthKey) &&
+        data.status is string && data.status.size() <= 15 && data.status in ['open', 'finalized'] &&
+        data.rewardsPublished is bool &&
+        data.announcementDate is string && data.announcementDate.size() <= 40 &&
+        data.rewardNote is string && data.rewardNote.size() <= 1000 &&
+        data.rewards is list && data.rewards.size() == 10 &&
+        isValidRewardSlot(data.rewards[0], 1) &&
+        isValidRewardSlot(data.rewards[1], 2) &&
+        isValidRewardSlot(data.rewards[2], 3) &&
+        isValidRewardSlot(data.rewards[3], 4) &&
+        isValidRewardSlot(data.rewards[4], 5) &&
+        isValidRewardSlot(data.rewards[5], 6) &&
+        isValidRewardSlot(data.rewards[6], 7) &&
+        isValidRewardSlot(data.rewards[7], 8) &&
+        isValidRewardSlot(data.rewards[8], 9) &&
+        isValidRewardSlot(data.rewards[9], 10) &&
+        data.finalizedAt is string && data.finalizedAt.size() <= 40 &&
+        data.finalizedBy is string && data.finalizedBy.size() <= 128 &&
+        (data.finalizedBy == '' || isValidId(data.finalizedBy)) &&
+        data.winnerCount is number && data.winnerCount >= 0 && data.winnerCount <= 10 &&
+        data.lastSyncedAt is string && data.lastSyncedAt.size() <= 40 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidLeaderboardWinner(data) {
+      return data.keys().hasAll([
+          'winnerId', 'monthKey', 'rank', 'userId', 'displayName', 'photoAssetId',
+          'eligibleEarnings', 'approvedTaskCount', 'reachedAtMs', 'prizeTitle',
+          'prizeDescription', 'monetaryValue', 'rewardStatus', 'deliveredAt',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'winnerId', 'monthKey', 'rank', 'userId', 'displayName', 'photoAssetId',
+          'eligibleEarnings', 'approvedTaskCount', 'reachedAtMs', 'prizeTitle',
+          'prizeDescription', 'monetaryValue', 'rewardStatus', 'deliveredAt',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.winnerId) &&
+        data.winnerId.size() == 10 &&
+        data.winnerId.matches('^[0-9]{4}-(0[1-9]|1[0-2])_(0[1-9]|10)$') &&
+        isValidMonthKeyString(data.monthKey) &&
+        data.rank is number && data.rank >= 1 && data.rank <= 10 &&
+        isValidId(data.userId) &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 300 &&
+        data.photoAssetId is string && data.photoAssetId.size() <= 128 &&
+        (data.photoAssetId == '' || isValidId(data.photoAssetId)) &&
+        data.eligibleEarnings is number && data.eligibleEarnings > 0 && data.eligibleEarnings <= 100000000 &&
+        data.approvedTaskCount is number && data.approvedTaskCount >= 1 && data.approvedTaskCount <= 1000000 &&
+        data.reachedAtMs is number && data.reachedAtMs >= 0 &&
+        data.prizeTitle is string && data.prizeTitle.size() <= 160 &&
+        data.prizeDescription is string && data.prizeDescription.size() <= 500 &&
+        data.monetaryValue is number && data.monetaryValue >= 0 && data.monetaryValue <= 10000000 &&
+        data.rewardStatus is string && data.rewardStatus.size() <= 15 &&
+        data.rewardStatus in ['pending', 'approved', 'awarded', 'cancelled'] &&
+        data.deliveredAt is string && data.deliveredAt.size() <= 40 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidLeaderboardAdminNote(data) {
+      return data.keys().hasAll([
+          'winnerId', 'monthKey', 'rank', 'userId', 'memberId',
+          'adminNote', 'updatedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'winnerId', 'monthKey', 'rank', 'userId', 'memberId',
+          'adminNote', 'updatedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.winnerId) &&
+        data.winnerId.size() == 10 &&
+        isValidMonthKeyString(data.monthKey) &&
+        data.rank is number && data.rank >= 1 && data.rank <= 10 &&
+        isValidId(data.userId) &&
+        data.memberId is string && data.memberId.size() >= 6 && data.memberId.size() <= 20 &&
+        data.adminNote is string && data.adminNote.size() <= 1000 &&
+        isValidId(data.updatedBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
     // =========================================================================
-    // Collection Match Blocks (All 13 Collections)
+    // Collection Match Blocks (All 17 Collections)
     // =========================================================================
 
     match /admins/{adminId} {
@@ -525,6 +667,7 @@ service cloud.firestore {
 
     match /mediaAssets/{assetId} {
       allow get: if isSignedIn() && isValidId(assetId) && (
+        resource.data.purpose == 'avatar' ||
         resource.data.ownerId == request.auth.uid ||
         isAdmin() ||
         isAssistantAdmin()
@@ -931,6 +1074,116 @@ service cloud.firestore {
         (isAdmin() || isAssistantAdmin());
       allow update: if false;
       allow delete: if false;
+    }
+
+    match /monthlyMemberEarnings/{entryId} {
+      allow get: if isSignedIn() && isValidId(entryId);
+      allow list: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(entryId) && isValidMonthlyMemberEarning(incoming()) &&
+        incoming().entryId == entryId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (
+            isAssistantAdmin() &&
+            incoming().isEligibleMember == true &&
+            isValidId(incoming().lastSubmissionId) &&
+            incoming().lastTransactionId == 'tx_reward_' + incoming().lastSubmissionId &&
+            incoming().approvedTaskCount == 1 &&
+            exists(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)) &&
+            get(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.userId == incoming().userId &&
+            get(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.status == 'pending' &&
+            getAfter(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.status == 'approved' &&
+            getAfter(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.reviewedBy == request.auth.uid &&
+            incoming().eligibleEarnings == get(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.rewardAmount
+          )
+        );
+      allow update: if isSignedIn() && isValidId(entryId) && isValidMonthlyMemberEarning(incoming()) &&
+        incoming().entryId == existing().entryId &&
+        incoming().monthKey == existing().monthKey &&
+        incoming().userId == existing().userId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (
+            isAssistantAdmin() &&
+            existing().isEligibleMember == true &&
+            incoming().isEligibleMember == true &&
+            isValidId(incoming().lastSubmissionId) &&
+            incoming().lastTransactionId == 'tx_reward_' + incoming().lastSubmissionId &&
+            incoming().approvedTaskCount == existing().approvedTaskCount + 1 &&
+            incoming().reachedAtMs >= existing().reachedAtMs &&
+            exists(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)) &&
+            get(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.userId == existing().userId &&
+            get(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.status == 'pending' &&
+            getAfter(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.status == 'approved' &&
+            getAfter(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.reviewedBy == request.auth.uid &&
+            incoming().eligibleEarnings == existing().eligibleEarnings + get(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.rewardAmount
+          ) ||
+          (
+            request.auth.uid == existing().userId &&
+            incoming().isEligibleMember == existing().isEligibleMember &&
+            incoming().eligibleEarnings == existing().eligibleEarnings &&
+            incoming().approvedTaskCount == existing().approvedTaskCount &&
+            incoming().reachedAtMs == existing().reachedAtMs &&
+            incoming().lastTransactionId == existing().lastTransactionId &&
+            incoming().lastSubmissionId == existing().lastSubmissionId &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoAssetId', 'updatedAt'])
+          )
+        );
+      allow delete: if false;
+    }
+
+    match /leaderboardPeriods/{monthKey} {
+      allow get: if isSignedIn() && isValidId(monthKey);
+      allow list: if isSignedIn();
+      allow create: if isVerifiedAdminAuth() && isValidId(monthKey) && isValidLeaderboardPeriod(incoming()) &&
+        incoming().monthKey == monthKey &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+      allow update: if isVerifiedAdminAuth() && isValidId(monthKey) && isValidLeaderboardPeriod(incoming()) &&
+        incoming().monthKey == existing().monthKey &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+      allow delete: if false;
+    }
+
+    match /leaderboardWinners/{winnerId} {
+      allow get: if isSignedIn() && isValidId(winnerId);
+      allow list: if isSignedIn();
+      allow create: if isVerifiedAdminAuth() && isValidId(winnerId) && isValidLeaderboardWinner(incoming()) &&
+        incoming().winnerId == winnerId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+      allow update: if isVerifiedAdminAuth() && isValidId(winnerId) && isValidLeaderboardWinner(incoming()) &&
+        incoming().winnerId == existing().winnerId &&
+        incoming().monthKey == existing().monthKey &&
+        incoming().rank == existing().rank &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+      allow delete: if isVerifiedAdminAuth() && isValidId(winnerId) && isAdmin();
+    }
+
+    match /leaderboardAdminNotes/{winnerId} {
+      allow get: if isVerifiedAdminAuth() && isValidId(winnerId) && isAdmin();
+      allow list: if isBootstrappedAdmin();
+      allow create: if isVerifiedAdminAuth() && isValidId(winnerId) && isValidLeaderboardAdminNote(incoming()) &&
+        incoming().winnerId == winnerId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+      allow update: if isVerifiedAdminAuth() && isValidId(winnerId) && isValidLeaderboardAdminNote(incoming()) &&
+        incoming().winnerId == existing().winnerId &&
+        incoming().monthKey == existing().monthKey &&
+        incoming().rank == existing().rank &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+      allow delete: if isVerifiedAdminAuth() && isValidId(winnerId) && isAdmin();
     }
   }
 }

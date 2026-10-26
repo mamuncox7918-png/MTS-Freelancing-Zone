@@ -16,7 +16,36 @@ import {
   handleFirestoreError,
   OperationType,
 } from './firebase';
-import { FIXED_WITHDRAWAL_FEE, MIN_WITHDRAWAL_GROSS } from '../types';
+import {
+  FIXED_WITHDRAWAL_FEE,
+  MIN_WITHDRAWAL_GROSS,
+  type UserProfile,
+  type WalletTransaction,
+} from '../types';
+import {
+  buildMonthlyEntryId,
+  buildWinnerDocId,
+  computeMonthlyLeaderboardFromTransactions,
+  createEmptyRewardConfigs,
+  extractTimestampMs,
+  getDhakaMonthKey,
+  isValidMonthKey,
+  normalizeRewardConfigs,
+} from './leaderboard';
+
+type BatchOp = (batch: ReturnType<typeof writeBatch>) => void;
+
+async function commitBatchOpsInChunks(ops: BatchOp[]): Promise<void> {
+  const CHUNK_SIZE = 400;
+  for (let i = 0; i < ops.length; i += CHUNK_SIZE) {
+    const slice = ops.slice(i, i + CHUNK_SIZE);
+    const batch = writeBatch(db);
+    for (const op of slice) {
+      op(batch);
+    }
+    await batch.commit();
+  }
+}
 
 const BD_PHONE_REGEX = /^(\+88)?01[3-9][0-9]{8}$/;
 const VALID_ID_REGEX = /^[a-zA-Z0-9_\-]+$/;
@@ -217,7 +246,12 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
 
     try {
       const userRef = doc(db, 'users', uid);
-      const userSnap = await getDoc(userRef);
+      const currentMonthEntryId = buildMonthlyEntryId(getDhakaMonthKey(), uid);
+      const monthlyEntryRef = doc(db, 'monthlyMemberEarnings', currentMonthEntryId);
+      const [userSnap, monthlyEntrySnap] = await Promise.all([
+        getDoc(userRef),
+        getDoc(monthlyEntryRef),
+      ]);
       if (!userSnap.exists()) {
         throw new Error('Member profile not found.');
       }
@@ -229,6 +263,13 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
         photoAssetId,
         updatedAt: serverTimestamp(),
       });
+      if (monthlyEntrySnap.exists()) {
+        batch.update(monthlyEntryRef, {
+          displayName: fullName,
+          photoAssetId,
+          updatedAt: serverTimestamp(),
+        });
+      }
       if (prevPhotoId && prevPhotoId !== photoAssetId) {
         batch.delete(doc(db, 'mediaAssets', prevPhotoId));
       }
@@ -678,12 +719,18 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
       const taskTitle = String(subData.taskTitle || 'Official Task').slice(0, 400);
       const taskCode = String(subData.taskCode || 'TSK-00000');
       const rewardAmount = Number(subData.rewardAmount);
-      const [memberSnap, walletSnap] = await Promise.all([
+      const nowIso = new Date().toISOString();
+      const nowMs = Date.parse(nowIso);
+      const monthKey = getDhakaMonthKey(nowMs);
+      const monthlyEntryId = buildMonthlyEntryId(monthKey, memberUid);
+      const [memberSnap, walletSnap, monthlyEntrySnap] = await Promise.all([
         getDoc(doc(db, 'users', memberUid)),
         getDoc(doc(db, 'wallets', memberUid)),
+        decision === 'approved'
+          ? getDoc(doc(db, 'monthlyMemberEarnings', monthlyEntryId))
+          : Promise.resolve(null),
       ]);
 
-      const nowIso = new Date().toISOString();
       const logId = randomDocId('log');
       const notifId = randomDocId('ntf');
       const batch = writeBatch(db);
@@ -735,6 +782,44 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
             totalEarnings: Number(memberData.totalEarnings || 0) + rewardAmount,
             updatedAt: serverTimestamp(),
           });
+
+          if (memberData.role === 'member' && memberData.status === 'approved') {
+            const displayName = String(
+              memberData.fullName || subData.memberName || 'Member'
+            ).slice(0, 300);
+            const photoAssetId = String(memberData.photoAssetId || '');
+            const entryRef = doc(db, 'monthlyMemberEarnings', monthlyEntryId);
+            if (monthlyEntrySnap && monthlyEntrySnap.exists()) {
+              const prevEntry = monthlyEntrySnap.data();
+              batch.update(entryRef, {
+                displayName,
+                photoAssetId,
+                isEligibleMember: true,
+                eligibleEarnings: Number(prevEntry.eligibleEarnings || 0) + rewardAmount,
+                approvedTaskCount: Number(prevEntry.approvedTaskCount || 0) + 1,
+                reachedAtMs: Math.max(nowMs, Number(prevEntry.reachedAtMs || 0)),
+                lastTransactionId: txId,
+                lastSubmissionId: submissionId,
+                updatedAt: serverTimestamp(),
+              });
+            } else {
+              batch.set(entryRef, {
+                entryId: monthlyEntryId,
+                monthKey,
+                userId: memberUid,
+                displayName,
+                photoAssetId,
+                isEligibleMember: true,
+                eligibleEarnings: rewardAmount,
+                approvedTaskCount: 1,
+                reachedAtMs: nowMs,
+                lastTransactionId: txId,
+                lastSubmissionId: submissionId,
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
+            }
+          }
         }
 
         batch.set(doc(db, 'transactions', txId), {
@@ -1392,12 +1477,19 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
         throw new Error('Approved amount must be a whole Taka integer between ৳1 and ৳100,000.');
       }
 
-      const [memberSnap, walletSnap] = await Promise.all([
+      const nowIso = new Date().toISOString();
+      const nowMs = Date.parse(nowIso);
+      const monthKey = getDhakaMonthKey(nowMs);
+      const monthlyEntryId = buildMonthlyEntryId(monthKey, memberUid);
+
+      const [memberSnap, walletSnap, monthlyEntrySnap] = await Promise.all([
         getDoc(doc(db, 'users', memberUid)),
         getDoc(doc(db, 'wallets', memberUid)),
+        decision === 'approved'
+          ? getDoc(doc(db, 'monthlyMemberEarnings', monthlyEntryId))
+          : Promise.resolve(null),
       ]);
 
-      const nowIso = new Date().toISOString();
       const txId = decision === 'approved' ? `tx_custom_${customTaskId}` : '';
       const notifId = randomDocId('ntf');
       const logId = randomDocId('log');
@@ -1447,6 +1539,44 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
             totalEarnings: Number(memberData.totalEarnings || 0) + finalApprovedAmount,
             updatedAt: serverTimestamp(),
           });
+
+          if (memberData.role === 'member' && memberData.status === 'approved') {
+            const displayName = String(
+              memberData.fullName || ctData.memberName || 'Member'
+            ).slice(0, 300);
+            const photoAssetId = String(memberData.photoAssetId || '');
+            const entryRef = doc(db, 'monthlyMemberEarnings', monthlyEntryId);
+            if (monthlyEntrySnap && monthlyEntrySnap.exists()) {
+              const prevEntry = monthlyEntrySnap.data();
+              batch.update(entryRef, {
+                displayName,
+                photoAssetId,
+                isEligibleMember: true,
+                eligibleEarnings: Number(prevEntry.eligibleEarnings || 0) + finalApprovedAmount,
+                approvedTaskCount: Number(prevEntry.approvedTaskCount || 0) + 1,
+                reachedAtMs: Math.max(nowMs, Number(prevEntry.reachedAtMs || 0)),
+                lastTransactionId: txId,
+                lastSubmissionId: customTaskId,
+                updatedAt: serverTimestamp(),
+              });
+            } else {
+              batch.set(entryRef, {
+                entryId: monthlyEntryId,
+                monthKey,
+                userId: memberUid,
+                displayName,
+                photoAssetId,
+                isEligibleMember: true,
+                eligibleEarnings: finalApprovedAmount,
+                approvedTaskCount: 1,
+                reachedAtMs: nowMs,
+                lastTransactionId: txId,
+                lastSubmissionId: customTaskId,
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
+            }
+          }
         }
 
         batch.set(doc(db, 'transactions', txId), {
@@ -1551,6 +1681,1021 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
       return { ok: true } as unknown as T;
     } catch (err) {
       wrapPermError(err, OperationType.UPDATE, `notifications/${notificationId}`);
+    }
+  }
+
+  // 20A. Main Admin: POST /api/admin/leaderboard/rewards
+  if (method === 'POST' && path === '/api/admin/leaderboard/rewards') {
+    const monthKey = typeof body.monthKey === 'string' ? body.monthKey.trim() : '';
+    if (!isValidMonthKey(monthKey)) {
+      throw new Error('Valid month key (YYYY-MM) is required.');
+    }
+
+    const rewards = normalizeRewardConfigs(body.rewards);
+    const rewardsPublished = Boolean(body.rewardsPublished);
+    const announcementDate =
+      typeof body.announcementDate === 'string' ? body.announcementDate.trim().slice(0, 40) : '';
+    const rewardNote =
+      typeof body.rewardNote === 'string' ? body.rewardNote.trim().slice(0, 1000) : '';
+    const confirmFinalizedEdit = Boolean(body.confirmFinalizedEdit);
+    const reason = typeof body.reason === 'string' ? body.reason.trim().slice(0, 300) : '';
+
+    try {
+      const periodRef = doc(db, 'leaderboardPeriods', monthKey);
+      const periodSnap = await getDoc(periodRef);
+      const isFinalized = periodSnap.exists() && periodSnap.data().status === 'finalized';
+
+      if (isFinalized && !confirmFinalizedEdit) {
+        throw new Error(
+          'This month is already finalized. Please confirm finalized reward modification with a reason.'
+        );
+      }
+      if (isFinalized && reason.length < 3) {
+        throw new Error(
+          'Please provide a reason (at least 3 characters) when updating a finalized month.'
+        );
+      }
+
+      const nowIso = new Date().toISOString();
+      const logId = randomDocId('log');
+      const ops: BatchOp[] = [];
+
+      if (periodSnap.exists()) {
+        ops.push((b) =>
+          b.update(periodRef, {
+            rewardsPublished,
+            announcementDate,
+            rewardNote,
+            rewards,
+            updatedAt: serverTimestamp(),
+          })
+        );
+      } else {
+        ops.push((b) =>
+          b.set(periodRef, {
+            monthKey,
+            status: 'open',
+            rewardsPublished,
+            announcementDate,
+            rewardNote,
+            rewards,
+            finalizedAt: '',
+            finalizedBy: '',
+            winnerCount: 0,
+            lastSyncedAt: nowIso,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          })
+        );
+      }
+
+      if (isFinalized) {
+        const winSnap = await getDocs(
+          query(collection(db, 'leaderboardWinners'), where('monthKey', '==', monthKey))
+        );
+        for (const wDoc of winSnap.docs) {
+          const wData = wDoc.data();
+          const r = Number(wData.rank);
+          const slot = rewards[r - 1];
+          const prizeTitle = slot && slot.enabled ? slot.prizeTitle : '';
+          const prizeDescription = slot && slot.enabled ? slot.prizeDescription : '';
+          const monetaryValue = slot && slot.enabled ? slot.monetaryValue : 0;
+          ops.push((b) =>
+            b.update(doc(db, 'leaderboardWinners', String(wData.winnerId)), {
+              prizeTitle,
+              prizeDescription,
+              monetaryValue,
+              updatedAt: serverTimestamp(),
+            })
+          );
+        }
+      }
+
+      const enabledCount = rewards.filter((r) => r.enabled).length;
+      ops.push((b) =>
+        b.set(doc(db, 'adminAuditLogs', logId), {
+          logId,
+          adminUid: uid,
+          adminEmail: email,
+          action: isFinalized
+            ? 'FINALIZED_LEADERBOARD_REWARDS_UPDATED'
+            : 'LEADERBOARD_REWARDS_UPDATED',
+          targetType: 'leaderboardPeriod',
+          targetId: monthKey,
+          summary: `Saved Best 10 rewards for ${monthKey} (${enabledCount} active positions, ${
+            rewardsPublished ? 'Published' : 'Draft'
+          })${reason ? ` · Reason: ${reason}` : ''}`.slice(0, 450),
+          createdAt: serverTimestamp(),
+        })
+      );
+
+      await commitBatchOpsInChunks(ops);
+      return { ok: true } as unknown as T;
+    } catch (err) {
+      wrapPermError(err, OperationType.WRITE, `leaderboardPeriods/${monthKey}`);
+    }
+  }
+
+  // 20B. Main Admin: POST /api/admin/leaderboard/recalculate
+  if (method === 'POST' && path === '/api/admin/leaderboard/recalculate') {
+    const monthKey = typeof body.monthKey === 'string' ? body.monthKey.trim() : '';
+    if (!isValidMonthKey(monthKey)) {
+      throw new Error('Valid month key (YYYY-MM) is required.');
+    }
+
+    const silentAutoSync = Boolean(body.silentAutoSync);
+    const confirmFinalizedOverride = Boolean(body.confirmFinalizedOverride);
+    const reason = typeof body.reason === 'string' ? body.reason.trim().slice(0, 300) : '';
+
+    try {
+      const periodRef = doc(db, 'leaderboardPeriods', monthKey);
+      const periodSnap = await getDoc(periodRef);
+      const isFinalized = periodSnap.exists() && periodSnap.data().status === 'finalized';
+
+      if (isFinalized && silentAutoSync) {
+        return { ok: true, skippedFinalized: true } as unknown as T;
+      }
+      if (isFinalized && !confirmFinalizedOverride) {
+        throw new Error(
+          'This month is finalized. Explicit confirmation and reason are required to recalculate a finalized month.'
+        );
+      }
+      if (isFinalized && reason.length < 5) {
+        throw new Error(
+          'Please provide a reason (at least 5 characters) when recalculating a finalized month.'
+        );
+      }
+
+      const [txSnap, userSnap, existingEntriesSnap] = await Promise.all([
+        getDocs(collection(db, 'transactions')),
+        getDocs(collection(db, 'users')),
+        getDocs(query(collection(db, 'monthlyMemberEarnings'), where('monthKey', '==', monthKey))),
+      ]);
+
+      const computed = computeMonthlyLeaderboardFromTransactions(
+        monthKey,
+        txSnap.docs.map((d) => d.data() as WalletTransaction),
+        userSnap.docs.map((d) => d.data() as UserProfile)
+      );
+
+      const existingByEntryId = new Map(
+        existingEntriesSnap.docs.map((d) => [String(d.data().entryId), d.data()])
+      );
+      const activeEntryIds = new Set<string>();
+      const ops: BatchOp[] = [];
+      let changedCount = 0;
+
+      for (const stat of computed.allMemberStats) {
+        const entryId = buildMonthlyEntryId(monthKey, stat.userId);
+        activeEntryIds.add(entryId);
+        const prev = existingByEntryId.get(entryId);
+        const entryRef = doc(db, 'monthlyMemberEarnings', entryId);
+
+        if (prev) {
+          const unchanged =
+            Number(prev.eligibleEarnings) === stat.eligibleEarnings &&
+            Number(prev.approvedTaskCount) === stat.approvedTaskCount &&
+            Number(prev.reachedAtMs) === stat.reachedAtMs &&
+            prev.displayName === stat.displayName &&
+            prev.photoAssetId === stat.photoAssetId &&
+            prev.isEligibleMember === true;
+          if (!unchanged) {
+            changedCount++;
+            ops.push((b) =>
+              b.update(entryRef, {
+                displayName: stat.displayName,
+                photoAssetId: stat.photoAssetId,
+                isEligibleMember: true,
+                eligibleEarnings: stat.eligibleEarnings,
+                approvedTaskCount: stat.approvedTaskCount,
+                reachedAtMs: stat.reachedAtMs,
+                lastTransactionId: stat.lastTransactionId,
+                lastSubmissionId: stat.lastSubmissionId,
+                updatedAt: serverTimestamp(),
+              })
+            );
+          }
+        } else {
+          changedCount++;
+          ops.push((b) =>
+            b.set(entryRef, {
+              entryId,
+              monthKey,
+              userId: stat.userId,
+              displayName: stat.displayName,
+              photoAssetId: stat.photoAssetId,
+              isEligibleMember: true,
+              eligibleEarnings: stat.eligibleEarnings,
+              approvedTaskCount: stat.approvedTaskCount,
+              reachedAtMs: stat.reachedAtMs,
+              lastTransactionId: stat.lastTransactionId,
+              lastSubmissionId: stat.lastSubmissionId,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            })
+          );
+        }
+      }
+
+      for (const [entryId, prev] of existingByEntryId.entries()) {
+        if (!activeEntryIds.has(entryId) && Number(prev.eligibleEarnings || 0) > 0) {
+          changedCount++;
+          ops.push((b) =>
+            b.update(doc(db, 'monthlyMemberEarnings', entryId), {
+              isEligibleMember: false,
+              eligibleEarnings: 0,
+              approvedTaskCount: 0,
+              reachedAtMs: 0,
+              lastTransactionId: 'admin_sync',
+              lastSubmissionId: '',
+              updatedAt: serverTimestamp(),
+            })
+          );
+        }
+      }
+
+      const nowIso = new Date().toISOString();
+      const rewards = periodSnap.exists()
+        ? normalizeRewardConfigs(periodSnap.data().rewards)
+        : createEmptyRewardConfigs();
+
+      if (!silentAutoSync || changedCount > 0) {
+        if (periodSnap.exists()) {
+          ops.push((b) =>
+            b.update(periodRef, {
+              winnerCount: isFinalized
+                ? computed.top10.length
+                : Number(periodSnap.data().winnerCount || 0),
+              lastSyncedAt: nowIso,
+              updatedAt: serverTimestamp(),
+            })
+          );
+        } else {
+          ops.push((b) =>
+            b.set(periodRef, {
+              monthKey,
+              status: 'open',
+              rewardsPublished: false,
+              announcementDate: '',
+              rewardNote: '',
+              rewards,
+              finalizedAt: '',
+              finalizedBy: '',
+              winnerCount: 0,
+              lastSyncedAt: nowIso,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            })
+          );
+        }
+      }
+
+      if (isFinalized && confirmFinalizedOverride) {
+        const [winSnap, noteSnap] = await Promise.all([
+          getDocs(query(collection(db, 'leaderboardWinners'), where('monthKey', '==', monthKey))),
+          getDocs(query(collection(db, 'leaderboardAdminNotes'), where('monthKey', '==', monthKey))),
+        ]);
+        const winById = new Map(winSnap.docs.map((w) => [String(w.data().winnerId), w.data()]));
+        const noteById = new Map(noteSnap.docs.map((n) => [String(n.data().winnerId), n.data()]));
+
+        for (const row of computed.top10) {
+          const winnerId = buildWinnerDocId(monthKey, row.rank);
+          const slot = rewards[row.rank - 1];
+          const prevWin = winById.get(winnerId);
+          const prevNote = noteById.get(winnerId);
+          const sameWinner = prevWin && prevWin.userId === row.userId;
+
+          const winPayload = {
+            winnerId,
+            monthKey,
+            rank: row.rank,
+            userId: row.userId,
+            displayName: row.displayName,
+            photoAssetId: row.photoAssetId,
+            eligibleEarnings: row.eligibleEarnings,
+            approvedTaskCount: row.approvedTaskCount,
+            reachedAtMs: row.reachedAtMs,
+            prizeTitle: slot && slot.enabled ? slot.prizeTitle : '',
+            prizeDescription: slot && slot.enabled ? slot.prizeDescription : '',
+            monetaryValue: slot && slot.enabled ? slot.monetaryValue : 0,
+            rewardStatus: sameWinner ? String(prevWin.rewardStatus) : 'pending',
+            deliveredAt: sameWinner ? String(prevWin.deliveredAt || '') : '',
+          };
+
+          if (prevWin) {
+            ops.push((b) =>
+              b.update(doc(db, 'leaderboardWinners', winnerId), {
+                ...winPayload,
+                updatedAt: serverTimestamp(),
+              })
+            );
+          } else {
+            ops.push((b) =>
+              b.set(doc(db, 'leaderboardWinners', winnerId), {
+                ...winPayload,
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              })
+            );
+          }
+
+          const notePayload = {
+            winnerId,
+            monthKey,
+            rank: row.rank,
+            userId: row.userId,
+            memberId: row.memberId,
+            adminNote:
+              prevNote && prevNote.userId === row.userId ? String(prevNote.adminNote || '') : '',
+            updatedBy: uid,
+          };
+
+          if (prevNote) {
+            ops.push((b) =>
+              b.update(doc(db, 'leaderboardAdminNotes', winnerId), {
+                ...notePayload,
+                updatedAt: serverTimestamp(),
+              })
+            );
+          } else {
+            ops.push((b) =>
+              b.set(doc(db, 'leaderboardAdminNotes', winnerId), {
+                ...notePayload,
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              })
+            );
+          }
+        }
+
+        for (let r = computed.top10.length + 1; r <= 10; r++) {
+          const staleId = buildWinnerDocId(monthKey, r);
+          if (winById.has(staleId)) {
+            ops.push((b) => b.delete(doc(db, 'leaderboardWinners', staleId)));
+          }
+          if (noteById.has(staleId)) {
+            ops.push((b) => b.delete(doc(db, 'leaderboardAdminNotes', staleId)));
+          }
+        }
+      }
+
+      if (!silentAutoSync || changedCount > 0) {
+        const logId = randomDocId('log');
+        ops.push((b) =>
+          b.set(doc(db, 'adminAuditLogs', logId), {
+            logId,
+            adminUid: uid,
+            adminEmail: email,
+            action: isFinalized
+              ? 'FINALIZED_LEADERBOARD_RECALCULATED'
+              : 'LEADERBOARD_RECALCULATED',
+            targetType: 'leaderboardPeriod',
+            targetId: monthKey,
+            summary: `Recalculated Best 10 for ${monthKey} from verified ledger (${
+              computed.allMemberStats.length
+            } eligible earners, ${changedCount} updated)${
+              reason ? ` · Reason: ${reason}` : ''
+            }`.slice(0, 450),
+            createdAt: serverTimestamp(),
+          })
+        );
+      }
+
+      if (ops.length > 0) {
+        await commitBatchOpsInChunks(ops);
+      }
+
+      return {
+        ok: true,
+        changedCount,
+        eligibleMemberCount: computed.allMemberStats.length,
+      } as unknown as T;
+    } catch (err) {
+      wrapPermError(err, OperationType.WRITE, `leaderboardPeriods/${monthKey}`);
+    }
+  }
+
+  // 20C. Main Admin: POST /api/admin/leaderboard/reverse-earning
+  if (method === 'POST' && path === '/api/admin/leaderboard/reverse-earning') {
+    const transactionId =
+      typeof body.transactionId === 'string' ? body.transactionId.trim() : '';
+    const reason = typeof body.reason === 'string' ? body.reason.trim().slice(0, 300) : '';
+    const confirmFinalizedOverride = Boolean(body.confirmFinalizedOverride);
+
+    if (!VALID_ID_REGEX.test(transactionId)) {
+      throw new Error('Valid transaction ID is required.');
+    }
+    if (reason.length < 5) {
+      throw new Error(
+        'Please provide a clear reversal reason (at least 5 characters) for the audit log.'
+      );
+    }
+
+    try {
+      const targetTxSnap = await getDoc(doc(db, 'transactions', transactionId));
+      if (!targetTxSnap.exists()) {
+        throw new Error('Target earning transaction not found.');
+      }
+      const targetTxData = targetTxSnap.data() as WalletTransaction;
+      if (
+        (targetTxData.type !== 'task_reward' && targetTxData.type !== 'custom_task_reward') ||
+        targetTxData.direction !== 'credit'
+      ) {
+        throw new Error('Only approved task reward credits can be reversed.');
+      }
+
+      const refId = String(targetTxData.referenceId);
+      const reversalTxId = `tx_reversal_${refId}`;
+      const existingReversalSnap = await getDoc(doc(db, 'transactions', reversalTxId));
+      if (existingReversalSnap.exists()) {
+        throw new Error('This earning transaction has already been reversed.');
+      }
+
+      const txMs =
+        extractTimestampMs(targetTxData.approvedAt) ||
+        extractTimestampMs(targetTxData.createdAt);
+      const monthKey = getDhakaMonthKey(txMs);
+      const periodRef = doc(db, 'leaderboardPeriods', monthKey);
+      const periodSnap = await getDoc(periodRef);
+      const isFinalized = periodSnap.exists() && periodSnap.data().status === 'finalized';
+
+      if (isFinalized && !confirmFinalizedOverride) {
+        throw new Error(
+          `Month ${monthKey} is finalized. Confirm finalized month override to reverse this earning.`
+        );
+      }
+
+      const memberUid = String(targetTxData.userId);
+      const amount = Number(targetTxData.amount);
+      const [walletSnap, profileSnap] = await Promise.all([
+        getDoc(doc(db, 'wallets', memberUid)),
+        getDoc(doc(db, 'users', memberUid)),
+      ]);
+
+      if (!walletSnap.exists()) {
+        throw new Error('Member wallet not found.');
+      }
+      const prevAvail = Number(walletSnap.data().availableBalance || 0);
+      if (prevAvail < amount) {
+        throw new Error(
+          `Cannot deduct ৳${amount} automatically because member currently has only ৳${prevAvail} available wallet balance.`
+        );
+      }
+
+      const nowIso = new Date().toISOString();
+      const notifId = randomDocId('ntf');
+      const logId = randomDocId('log');
+      const revBatch = writeBatch(db);
+
+      revBatch.update(doc(db, 'wallets', memberUid), {
+        availableBalance: prevAvail - amount,
+        totalEarnings: Math.max(0, Number(walletSnap.data().totalEarnings || 0) - amount),
+        updatedAt: serverTimestamp(),
+      });
+      revBatch.set(doc(db, 'transactions', reversalTxId), {
+        transactionId: reversalTxId,
+        userId: memberUid,
+        memberId: String(targetTxData.memberId),
+        type: 'earning_reversal',
+        amount,
+        feeAmount: 0,
+        netAmount: amount,
+        direction: 'debit',
+        description: `Admin reversed task earning (${
+          targetTxData.taskName || refId
+        }): -৳${amount} · Reason: ${reason}`.slice(0, 900),
+        referenceId: refId,
+        taskName: String(targetTxData.taskName || ''),
+        submissionId: String(targetTxData.submissionId || refId),
+        approvedAt: nowIso,
+        createdAt: serverTimestamp(),
+      });
+
+      if (profileSnap.exists()) {
+        const pData = profileSnap.data();
+        revBatch.update(doc(db, 'users', memberUid), {
+          completedTasksCount: Math.max(0, Number(pData.completedTasksCount || 0) - 1),
+          totalEarnings: Math.max(0, Number(pData.totalEarnings || 0) - amount),
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      revBatch.set(doc(db, 'notifications', notifId), {
+        notificationId: notifId,
+        userId: memberUid,
+        type: 'earning_reversed',
+        title: 'Task Earning Reversed',
+        message: `৳${amount} from "${
+          targetTxData.taskName || refId
+        }" was reversed by Admin. Reason: ${reason}`.slice(0, 900),
+        referenceId: refId,
+        isRead: false,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      revBatch.set(doc(db, 'adminAuditLogs', logId), {
+        logId,
+        adminUid: uid,
+        adminEmail: email,
+        action: 'EARNING_REVERSED',
+        targetType: 'transaction',
+        targetId: reversalTxId,
+        summary: `Reversed ৳${amount} earning (${transactionId}) for ${targetTxData.memberId} in ${monthKey} · Reason: ${reason}`.slice(
+          0,
+          450
+        ),
+        createdAt: serverTimestamp(),
+      });
+
+      await revBatch.commit();
+
+      // Immediately recalculate the affected member's monthly leaderboard entry
+      const entryId = buildMonthlyEntryId(monthKey, memberUid);
+      const [txSnap, userSnap, existingEntrySnap] = await Promise.all([
+        getDocs(collection(db, 'transactions')),
+        getDocs(collection(db, 'users')),
+        getDoc(doc(db, 'monthlyMemberEarnings', entryId)),
+      ]);
+
+      const computed = computeMonthlyLeaderboardFromTransactions(
+        monthKey,
+        txSnap.docs.map((d) => d.data() as WalletTransaction),
+        userSnap.docs.map((d) => d.data() as UserProfile)
+      );
+      const updatedStat = computed.allMemberStats.find((s) => s.userId === memberUid);
+      const syncOps: BatchOp[] = [];
+
+      if (existingEntrySnap.exists()) {
+        syncOps.push((b) =>
+          b.update(doc(db, 'monthlyMemberEarnings', entryId), {
+            isEligibleMember: Boolean(updatedStat),
+            eligibleEarnings: updatedStat ? updatedStat.eligibleEarnings : 0,
+            approvedTaskCount: updatedStat ? updatedStat.approvedTaskCount : 0,
+            reachedAtMs: updatedStat ? updatedStat.reachedAtMs : 0,
+            lastTransactionId: updatedStat ? updatedStat.lastTransactionId : reversalTxId,
+            lastSubmissionId: updatedStat ? updatedStat.lastSubmissionId : refId,
+            updatedAt: serverTimestamp(),
+          })
+        );
+      }
+
+      if (isFinalized && confirmFinalizedOverride && periodSnap.exists()) {
+        const rewards = normalizeRewardConfigs(periodSnap.data().rewards);
+        const [winSnap, noteSnap] = await Promise.all([
+          getDocs(query(collection(db, 'leaderboardWinners'), where('monthKey', '==', monthKey))),
+          getDocs(query(collection(db, 'leaderboardAdminNotes'), where('monthKey', '==', monthKey))),
+        ]);
+        const winById = new Map(winSnap.docs.map((w) => [String(w.data().winnerId), w.data()]));
+        const noteById = new Map(noteSnap.docs.map((n) => [String(n.data().winnerId), n.data()]));
+
+        syncOps.push((b) =>
+          b.update(periodRef, {
+            winnerCount: computed.top10.length,
+            lastSyncedAt: nowIso,
+            updatedAt: serverTimestamp(),
+          })
+        );
+
+        for (const row of computed.top10) {
+          const winnerId = buildWinnerDocId(monthKey, row.rank);
+          const slot = rewards[row.rank - 1];
+          const prevWin = winById.get(winnerId);
+          const prevNote = noteById.get(winnerId);
+          const sameWinner = prevWin && prevWin.userId === row.userId;
+
+          const winPayload = {
+            winnerId,
+            monthKey,
+            rank: row.rank,
+            userId: row.userId,
+            displayName: row.displayName,
+            photoAssetId: row.photoAssetId,
+            eligibleEarnings: row.eligibleEarnings,
+            approvedTaskCount: row.approvedTaskCount,
+            reachedAtMs: row.reachedAtMs,
+            prizeTitle: slot && slot.enabled ? slot.prizeTitle : '',
+            prizeDescription: slot && slot.enabled ? slot.prizeDescription : '',
+            monetaryValue: slot && slot.enabled ? slot.monetaryValue : 0,
+            rewardStatus: sameWinner ? String(prevWin.rewardStatus) : 'pending',
+            deliveredAt: sameWinner ? String(prevWin.deliveredAt || '') : '',
+          };
+          if (prevWin) {
+            syncOps.push((b) =>
+              b.update(doc(db, 'leaderboardWinners', winnerId), {
+                ...winPayload,
+                updatedAt: serverTimestamp(),
+              })
+            );
+          } else {
+            syncOps.push((b) =>
+              b.set(doc(db, 'leaderboardWinners', winnerId), {
+                ...winPayload,
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              })
+            );
+          }
+
+          const notePayload = {
+            winnerId,
+            monthKey,
+            rank: row.rank,
+            userId: row.userId,
+            memberId: row.memberId,
+            adminNote:
+              prevNote && prevNote.userId === row.userId ? String(prevNote.adminNote || '') : '',
+            updatedBy: uid,
+          };
+          if (prevNote) {
+            syncOps.push((b) =>
+              b.update(doc(db, 'leaderboardAdminNotes', winnerId), {
+                ...notePayload,
+                updatedAt: serverTimestamp(),
+              })
+            );
+          } else {
+            syncOps.push((b) =>
+              b.set(doc(db, 'leaderboardAdminNotes', winnerId), {
+                ...notePayload,
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              })
+            );
+          }
+        }
+
+        for (let r = computed.top10.length + 1; r <= 10; r++) {
+          const staleId = buildWinnerDocId(monthKey, r);
+          if (winById.has(staleId)) {
+            syncOps.push((b) => b.delete(doc(db, 'leaderboardWinners', staleId)));
+          }
+          if (noteById.has(staleId)) {
+            syncOps.push((b) => b.delete(doc(db, 'leaderboardAdminNotes', staleId)));
+          }
+        }
+      }
+
+      if (syncOps.length > 0) {
+        await commitBatchOpsInChunks(syncOps);
+      }
+
+      return { ok: true, reversalTransactionId: reversalTxId, monthKey } as unknown as T;
+    } catch (err) {
+      wrapPermError(err, OperationType.WRITE, `transactions/${transactionId}`);
+    }
+  }
+
+  // 20D. Main Admin: POST /api/admin/leaderboard/finalize
+  if (method === 'POST' && path === '/api/admin/leaderboard/finalize') {
+    const monthKey = typeof body.monthKey === 'string' ? body.monthKey.trim() : '';
+    if (!isValidMonthKey(monthKey)) {
+      throw new Error('Valid month key (YYYY-MM) is required.');
+    }
+    const confirmReFinalize = Boolean(body.confirmReFinalize);
+    const note = typeof body.note === 'string' ? body.note.trim().slice(0, 300) : '';
+
+    try {
+      const periodRef = doc(db, 'leaderboardPeriods', monthKey);
+      const periodSnap = await getDoc(periodRef);
+      if (periodSnap.exists() && periodSnap.data().status === 'finalized' && !confirmReFinalize) {
+        throw new Error(
+          'This month is already finalized. Confirm re-finalization if you intend to refresh the archived snapshot.'
+        );
+      }
+      if (periodSnap.exists() && periodSnap.data().status === 'finalized' && note.length < 3) {
+        throw new Error(
+          'Please provide a reason (at least 3 characters) when re-finalizing an archived month.'
+        );
+      }
+
+      const [txSnap, userSnap, existingEntriesSnap, winSnap, noteSnap] = await Promise.all([
+        getDocs(collection(db, 'transactions')),
+        getDocs(collection(db, 'users')),
+        getDocs(query(collection(db, 'monthlyMemberEarnings'), where('monthKey', '==', monthKey))),
+        getDocs(query(collection(db, 'leaderboardWinners'), where('monthKey', '==', monthKey))),
+        getDocs(query(collection(db, 'leaderboardAdminNotes'), where('monthKey', '==', monthKey))),
+      ]);
+
+      const computed = computeMonthlyLeaderboardFromTransactions(
+        monthKey,
+        txSnap.docs.map((d) => d.data() as WalletTransaction),
+        userSnap.docs.map((d) => d.data() as UserProfile)
+      );
+
+      const rewards = periodSnap.exists()
+        ? normalizeRewardConfigs(periodSnap.data().rewards)
+        : createEmptyRewardConfigs();
+      const nowIso = new Date().toISOString();
+      const ops: BatchOp[] = [];
+
+      const existingByEntryId = new Map(
+        existingEntriesSnap.docs.map((d) => [String(d.data().entryId), d.data()])
+      );
+      const activeEntryIds = new Set<string>();
+      for (const stat of computed.allMemberStats) {
+        const entryId = buildMonthlyEntryId(monthKey, stat.userId);
+        activeEntryIds.add(entryId);
+        const prev = existingByEntryId.get(entryId);
+        if (prev) {
+          ops.push((b) =>
+            b.update(doc(db, 'monthlyMemberEarnings', entryId), {
+              displayName: stat.displayName,
+              photoAssetId: stat.photoAssetId,
+              isEligibleMember: true,
+              eligibleEarnings: stat.eligibleEarnings,
+              approvedTaskCount: stat.approvedTaskCount,
+              reachedAtMs: stat.reachedAtMs,
+              lastTransactionId: stat.lastTransactionId,
+              lastSubmissionId: stat.lastSubmissionId,
+              updatedAt: serverTimestamp(),
+            })
+          );
+        } else {
+          ops.push((b) =>
+            b.set(doc(db, 'monthlyMemberEarnings', entryId), {
+              entryId,
+              monthKey,
+              userId: stat.userId,
+              displayName: stat.displayName,
+              photoAssetId: stat.photoAssetId,
+              isEligibleMember: true,
+              eligibleEarnings: stat.eligibleEarnings,
+              approvedTaskCount: stat.approvedTaskCount,
+              reachedAtMs: stat.reachedAtMs,
+              lastTransactionId: stat.lastTransactionId,
+              lastSubmissionId: stat.lastSubmissionId,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            })
+          );
+        }
+      }
+      for (const [entryId, prev] of existingByEntryId.entries()) {
+        if (!activeEntryIds.has(entryId) && Number(prev.eligibleEarnings || 0) > 0) {
+          ops.push((b) =>
+            b.update(doc(db, 'monthlyMemberEarnings', entryId), {
+              isEligibleMember: false,
+              eligibleEarnings: 0,
+              approvedTaskCount: 0,
+              reachedAtMs: 0,
+              lastTransactionId: 'admin_sync',
+              lastSubmissionId: '',
+              updatedAt: serverTimestamp(),
+            })
+          );
+        }
+      }
+
+      if (periodSnap.exists()) {
+        ops.push((b) =>
+          b.update(periodRef, {
+            status: 'finalized',
+            finalizedAt: nowIso,
+            finalizedBy: uid,
+            winnerCount: computed.top10.length,
+            lastSyncedAt: nowIso,
+            updatedAt: serverTimestamp(),
+          })
+        );
+      } else {
+        ops.push((b) =>
+          b.set(periodRef, {
+            monthKey,
+            status: 'finalized',
+            rewardsPublished: false,
+            announcementDate: '',
+            rewardNote: '',
+            rewards,
+            finalizedAt: nowIso,
+            finalizedBy: uid,
+            winnerCount: computed.top10.length,
+            lastSyncedAt: nowIso,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          })
+        );
+      }
+
+      const winById = new Map(winSnap.docs.map((w) => [String(w.data().winnerId), w.data()]));
+      const noteById = new Map(noteSnap.docs.map((n) => [String(n.data().winnerId), n.data()]));
+
+      for (const row of computed.top10) {
+        const winnerId = buildWinnerDocId(monthKey, row.rank);
+        const slot = rewards[row.rank - 1];
+        const prevWin = winById.get(winnerId);
+        const prevNote = noteById.get(winnerId);
+        const sameWinner = prevWin && prevWin.userId === row.userId;
+
+        const winPayload = {
+          winnerId,
+          monthKey,
+          rank: row.rank,
+          userId: row.userId,
+          displayName: row.displayName,
+          photoAssetId: row.photoAssetId,
+          eligibleEarnings: row.eligibleEarnings,
+          approvedTaskCount: row.approvedTaskCount,
+          reachedAtMs: row.reachedAtMs,
+          prizeTitle: slot && slot.enabled ? slot.prizeTitle : '',
+          prizeDescription: slot && slot.enabled ? slot.prizeDescription : '',
+          monetaryValue: slot && slot.enabled ? slot.monetaryValue : 0,
+          rewardStatus: sameWinner ? String(prevWin.rewardStatus) : 'pending',
+          deliveredAt: sameWinner ? String(prevWin.deliveredAt || '') : '',
+        };
+
+        if (prevWin) {
+          ops.push((b) =>
+            b.update(doc(db, 'leaderboardWinners', winnerId), {
+              ...winPayload,
+              updatedAt: serverTimestamp(),
+            })
+          );
+        } else {
+          ops.push((b) =>
+            b.set(doc(db, 'leaderboardWinners', winnerId), {
+              ...winPayload,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            })
+          );
+        }
+
+        const notePayload = {
+          winnerId,
+          monthKey,
+          rank: row.rank,
+          userId: row.userId,
+          memberId: row.memberId,
+          adminNote:
+            prevNote && prevNote.userId === row.userId ? String(prevNote.adminNote || '') : '',
+          updatedBy: uid,
+        };
+
+        if (prevNote) {
+          ops.push((b) =>
+            b.update(doc(db, 'leaderboardAdminNotes', winnerId), {
+              ...notePayload,
+              updatedAt: serverTimestamp(),
+            })
+          );
+        } else {
+          ops.push((b) =>
+            b.set(doc(db, 'leaderboardAdminNotes', winnerId), {
+              ...notePayload,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            })
+          );
+        }
+      }
+
+      for (let r = computed.top10.length + 1; r <= 10; r++) {
+        const staleId = buildWinnerDocId(monthKey, r);
+        if (winById.has(staleId)) {
+          ops.push((b) => b.delete(doc(db, 'leaderboardWinners', staleId)));
+        }
+        if (noteById.has(staleId)) {
+          ops.push((b) => b.delete(doc(db, 'leaderboardAdminNotes', staleId)));
+        }
+      }
+
+      const logId = randomDocId('log');
+      ops.push((b) =>
+        b.set(doc(db, 'adminAuditLogs', logId), {
+          logId,
+          adminUid: uid,
+          adminEmail: email,
+          action: confirmReFinalize
+            ? 'LEADERBOARD_MONTH_REFINALIZED'
+            : 'LEADERBOARD_MONTH_FINALIZED',
+          targetType: 'leaderboardPeriod',
+          targetId: monthKey,
+          summary: `Finalized Best 10 month ${monthKey} with ${computed.top10.length} archived winners${
+            note ? ` · Note: ${note}` : ''
+          }`.slice(0, 450),
+          createdAt: serverTimestamp(),
+        })
+      );
+
+      await commitBatchOpsInChunks(ops);
+      return { ok: true, winnerCount: computed.top10.length } as unknown as T;
+    } catch (err) {
+      wrapPermError(err, OperationType.WRITE, `leaderboardPeriods/${monthKey}`);
+    }
+  }
+
+  // 20E. Main Admin: POST /api/admin/leaderboard/winners/:winnerId/status
+  const winStatusMatch = path.match(
+    /^\/api\/admin\/leaderboard\/winners\/([0-9]{4}-(?:0[1-9]|1[0-2])_(?:0[1-9]|10))\/status$/
+  );
+  if (method === 'POST' && winStatusMatch) {
+    const winnerId = winStatusMatch[1];
+    const rewardStatus = body.rewardStatus;
+    if (
+      rewardStatus !== 'pending' &&
+      rewardStatus !== 'approved' &&
+      rewardStatus !== 'awarded' &&
+      rewardStatus !== 'cancelled'
+    ) {
+      throw new Error('Invalid reward status.');
+    }
+
+    const rawDeliveredAt =
+      typeof body.deliveredAt === 'string' ? body.deliveredAt.trim().slice(0, 40) : '';
+    const adminNote =
+      typeof body.adminNote === 'string' ? body.adminNote.trim().slice(0, 1000) : '';
+    const notifyWinner = body.notifyWinner !== false;
+    const nowIso = new Date().toISOString();
+
+    try {
+      const winRef = doc(db, 'leaderboardWinners', winnerId);
+      const noteRef = doc(db, 'leaderboardAdminNotes', winnerId);
+      const [winSnap, noteSnap] = await Promise.all([getDoc(winRef), getDoc(noteRef)]);
+
+      if (!winSnap.exists()) {
+        throw new Error('Finalized winner record not found.');
+      }
+      const winData = winSnap.data();
+      const userSnap = await getDoc(doc(db, 'users', String(winData.userId)));
+      const memberCode = String(
+        (noteSnap.exists() ? noteSnap.data().memberId : '') ||
+          (userSnap.exists() ? userSnap.data().memberId : '') ||
+          'MTS-000000'
+      );
+
+      const deliveredAt =
+        rewardStatus === 'awarded'
+          ? rawDeliveredAt || String(winData.deliveredAt || '') || nowIso
+          : rewardStatus === 'cancelled' || rewardStatus === 'pending'
+          ? ''
+          : rawDeliveredAt;
+
+      const batch = writeBatch(db);
+      batch.update(winRef, {
+        rewardStatus,
+        deliveredAt,
+        updatedAt: serverTimestamp(),
+      });
+
+      const notePayload = {
+        winnerId,
+        monthKey: String(winData.monthKey),
+        rank: Number(winData.rank),
+        userId: String(winData.userId),
+        memberId: memberCode,
+        adminNote,
+        updatedBy: uid,
+      };
+      if (noteSnap.exists()) {
+        batch.update(noteRef, {
+          ...notePayload,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        batch.set(noteRef, {
+          ...notePayload,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      if (rewardStatus === 'awarded' && notifyWinner && winData.rewardStatus !== 'awarded') {
+        const notifId = randomDocId('ntf');
+        const prizeText = String(winData.prizeTitle || 'Monthly Best 10 Prize');
+        batch.set(doc(db, 'notifications', notifId), {
+          notificationId: notifId,
+          userId: String(winData.userId),
+          type: 'leaderboard_reward',
+          title: `Best 10 Rank #${winData.rank} Reward Delivered!`,
+          message: `Congratulations! Your ${winData.monthKey} Best 10 reward (${prizeText}) has been marked as Awarded.`.slice(
+            0,
+            900
+          ),
+          referenceId: winnerId,
+          isRead: false,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      const logId = randomDocId('log');
+      batch.set(doc(db, 'adminAuditLogs', logId), {
+        logId,
+        adminUid: uid,
+        adminEmail: email,
+        action: 'LEADERBOARD_REWARD_STATUS_UPDATED',
+        targetType: 'leaderboardWinner',
+        targetId: winnerId,
+        summary: `Updated ${winData.monthKey} Rank #${winData.rank} (${memberCode}) reward status to ${rewardStatus}${
+          adminNote ? ` · Note: ${adminNote}` : ''
+        }`.slice(0, 450),
+        createdAt: serverTimestamp(),
+      });
+
+      await batch.commit();
+      return { ok: true } as unknown as T;
+    } catch (err) {
+      wrapPermError(err, OperationType.UPDATE, `leaderboardWinners/${winnerId}`);
     }
   }
 

@@ -127,6 +127,15 @@ export async function runFirestoreRulesAudit(emulatorHost = '127.0.0.1', emulato
         sizeBytes: 64,
         createdAt: now,
       });
+      await setDoc(doc(adminDb, 'mediaAssets', 'avatar_m1'), {
+        assetId: 'avatar_m1',
+        ownerId: 'member_1',
+        purpose: 'avatar',
+        mimeType: 'image/webp',
+        dataUrl: 'data:image/webp;base64,UklGRh4AAABXRUJQVlA4TBEAAAAvAAAAAAfQ//73v/+BiOh/AAA=',
+        sizeBytes: 64,
+        createdAt: now,
+      });
       await setDoc(doc(adminDb, 'submissions', 'sub_pending_1'), {
         submissionId: 'sub_pending_1',
         taskId: 'tsk_1',
@@ -409,7 +418,7 @@ export async function runFirestoreRulesAudit(emulatorHost = '127.0.0.1', emulato
       })
     );
 
-    // Dirty Dozen #12: Shadow field injection on profile update
+    // Dirty Dozen #12: Shadow field injection, Best 10 leaderboard spoofing, & private proof/admin-note isolation
     await assertFails(
       updateDoc(doc(member1Db, 'users', 'member_1'), {
         fullName: 'Updated Name',
@@ -417,6 +426,47 @@ export async function runFirestoreRulesAudit(emulatorHost = '127.0.0.1', emulato
         updatedAt: serverTimestamp(),
       })
     );
+    await assertFails(
+      setDoc(doc(member1Db, 'monthlyMemberEarnings', '2026-10_member_1'), {
+        entryId: '2026-10_member_1',
+        monthKey: '2026-10',
+        userId: 'member_1',
+        displayName: 'Approved Member One',
+        photoAssetId: '',
+        isEligibleMember: true,
+        eligibleEarnings: 999999,
+        approvedTaskCount: 50,
+        reachedAtMs: Date.now(),
+        lastTransactionId: 'tx_forged',
+        lastSubmissionId: 'sub_forged',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    );
+    await assertFails(
+      setDoc(doc(assistantDb, 'leaderboardWinners', '2026-10_01'), {
+        winnerId: '2026-10_01',
+        monthKey: '2026-10',
+        rank: 1,
+        userId: 'member_1',
+        displayName: 'Approved Member One',
+        photoAssetId: '',
+        eligibleEarnings: 5000,
+        approvedTaskCount: 10,
+        reachedAtMs: Date.now(),
+        prizeTitle: 'Unauthorized Winner',
+        prizeDescription: '',
+        monetaryValue: 1000,
+        rewardStatus: 'awarded',
+        deliveredAt: '2026-10-31',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    );
+    await assertFails(getDocs(collection(member1Db, 'leaderboardAdminNotes')));
+    // Cross-member avatar GET is permitted for leaderboard rendering, whereas cross-member proof GET is denied
+    await assertSucceeds(getDoc(doc(attackerDb, 'mediaAssets', 'avatar_m1')));
+    await assertFails(getDoc(doc(attackerDb, 'mediaAssets', 'asset_m1')));
 
     // Positive Assertion A: Assistant Admin can inspect & recommend on custom task without crediting wallet
     await assertSucceeds(
@@ -472,6 +522,21 @@ export async function runFirestoreRulesAudit(emulatorHost = '127.0.0.1', emulato
       submissionId: 'sub_pending_1',
       approvedAt: nowIso,
       createdAt: serverTimestamp(),
+    });
+    assistantBatch.set(doc(assistantDb, 'monthlyMemberEarnings', '2026-10_member_1'), {
+      entryId: '2026-10_member_1',
+      monthKey: '2026-10',
+      userId: 'member_1',
+      displayName: 'Approved Member One',
+      photoAssetId: '',
+      isEligibleMember: true,
+      eligibleEarnings: 20,
+      approvedTaskCount: 1,
+      reachedAtMs: Date.parse(nowIso),
+      lastTransactionId: 'tx_reward_sub_pending_1',
+      lastSubmissionId: 'sub_pending_1',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
     });
     await assertSucceeds(assistantBatch.commit());
   } finally {

@@ -644,7 +644,9 @@
             "custom_task_approved",
             "custom_task_rejected",
             "task_approved",
-            "task_rejected"
+            "task_rejected",
+            "earning_reversed",
+            "leaderboard_reward"
           ],
           "maxLength": 30
         },
@@ -794,6 +796,7 @@
           "enum": [
             "task_reward",
             "custom_task_reward",
+            "earning_reversal",
             "withdrawal_request",
             "withdrawal_paid",
             "withdrawal_refund"
@@ -1141,6 +1144,383 @@
         }
       },
       "required": ["logId", "adminUid", "adminEmail", "action", "targetType", "targetId", "summary", "createdAt"]
+    },
+    "MonthlyMemberEarning": {
+      "title": "MonthlyMemberEarning",
+      "description": "Public-safe, non-PII monthly eligible earnings projection for a member in an Asia/Dhaka (UTC+6) calendar month.",
+      "type": "object",
+      "properties": {
+        "entryId": {
+          "type": "string",
+          "description": "Deterministic monthly entry ID (${monthKey}_${userId}).",
+          "minLength": 9,
+          "maxLength": 128,
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])_[a-zA-Z0-9_\\-]+$"
+        },
+        "monthKey": {
+          "type": "string",
+          "description": "Asia/Dhaka calendar month key (YYYY-MM).",
+          "minLength": 7,
+          "maxLength": 7,
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Member UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Public display name of the member.",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "photoAssetId": {
+          "type": "string",
+          "description": "Optional avatar mediaAsset ID, or empty string.",
+          "maxLength": 128
+        },
+        "isEligibleMember": {
+          "type": "boolean",
+          "description": "Whether the account is an approved eligible member."
+        },
+        "eligibleEarnings": {
+          "type": "number",
+          "description": "Net approved eligible task earnings in BDT during this calendar month."
+        },
+        "approvedTaskCount": {
+          "type": "number",
+          "description": "Count of valid approved task credits during this calendar month."
+        },
+        "reachedAtMs": {
+          "type": "number",
+          "description": "Epoch milliseconds when the member reached their current monthly eligible total (used for tie-breaking)."
+        },
+        "lastTransactionId": {
+          "type": "string",
+          "description": "Most recent applied transaction ID or sync marker.",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "lastSubmissionId": {
+          "type": "string",
+          "description": "Submission ID used for atomic Assistant Admin single-credit verification, or empty string.",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp."
+        }
+      },
+      "required": [
+        "entryId",
+        "monthKey",
+        "userId",
+        "displayName",
+        "photoAssetId",
+        "isEligibleMember",
+        "eligibleEarnings",
+        "approvedTaskCount",
+        "reachedAtMs",
+        "lastTransactionId",
+        "lastSubmissionId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "LeaderboardRankRewardConfig": {
+      "title": "LeaderboardRankRewardConfig",
+      "description": "Prize configuration for a single Best 10 rank position (1st to 10th).",
+      "type": "object",
+      "properties": {
+        "rank": {
+          "type": "number",
+          "description": "Leaderboard rank position (1 to 10)."
+        },
+        "prizeTitle": {
+          "type": "string",
+          "description": "Prize title configured by Main Admin.",
+          "maxLength": 160
+        },
+        "prizeDescription": {
+          "type": "string",
+          "description": "Prize description.",
+          "maxLength": 500
+        },
+        "monetaryValue": {
+          "type": "number",
+          "description": "Optional monetary value in BDT (0 if non-cash or unspecified)."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether a prize is enabled for this rank."
+        }
+      },
+      "required": ["rank", "prizeTitle", "prizeDescription", "monetaryValue", "enabled"]
+    },
+    "LeaderboardPeriod": {
+      "title": "LeaderboardPeriod",
+      "description": "Monthly Best 10 period metadata, reward configuration for positions 1-10, publication toggle, and finalization state.",
+      "type": "object",
+      "properties": {
+        "monthKey": {
+          "type": "string",
+          "description": "Asia/Dhaka calendar month key (YYYY-MM).",
+          "minLength": 7,
+          "maxLength": 7,
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])$"
+        },
+        "status": {
+          "type": "string",
+          "description": "Period lifecycle status.",
+          "enum": ["open", "finalized"],
+          "maxLength": 15
+        },
+        "rewardsPublished": {
+          "type": "boolean",
+          "description": "Whether configured monthly rewards are visible to members."
+        },
+        "announcementDate": {
+          "type": "string",
+          "description": "Optional prize announcement date.",
+          "maxLength": 40
+        },
+        "rewardNote": {
+          "type": "string",
+          "description": "Optional public announcement note.",
+          "maxLength": 1000
+        },
+        "rewards": {
+          "type": "array",
+          "description": "Ordered 10-slot reward configurations for positions 1 to 10.",
+          "items": { "$ref": "#/entities/LeaderboardRankRewardConfig" }
+        },
+        "finalizedAt": {
+          "type": "string",
+          "description": "ISO timestamp when finalized by Main Admin, or empty string.",
+          "maxLength": 40
+        },
+        "finalizedBy": {
+          "type": "string",
+          "description": "Main Admin UID who finalized the month, or empty string.",
+          "maxLength": 128
+        },
+        "winnerCount": {
+          "type": "number",
+          "description": "Count of finalized winners (0 to 10)."
+        },
+        "lastSyncedAt": {
+          "type": "string",
+          "description": "ISO timestamp of most recent ledger sync.",
+          "maxLength": 40
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Update server timestamp."
+        }
+      },
+      "required": [
+        "monthKey",
+        "status",
+        "rewardsPublished",
+        "announcementDate",
+        "rewardNote",
+        "rewards",
+        "finalizedAt",
+        "finalizedBy",
+        "winnerCount",
+        "lastSyncedAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "LeaderboardWinner": {
+      "title": "LeaderboardWinner",
+      "description": "Archived finalized Best 10 monthly winner record (zero PII).",
+      "type": "object",
+      "properties": {
+        "winnerId": {
+          "type": "string",
+          "description": "Deterministic winner document ID (${monthKey}_${01..10}).",
+          "minLength": 10,
+          "maxLength": 20,
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])_(0[1-9]|10)$"
+        },
+        "monthKey": {
+          "type": "string",
+          "description": "Asia/Dhaka calendar month key (YYYY-MM).",
+          "minLength": 7,
+          "maxLength": 7,
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])$"
+        },
+        "rank": {
+          "type": "number",
+          "description": "Finalized position (1 to 10)."
+        },
+        "userId": {
+          "type": "string",
+          "description": "Winner UID.",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Winner display name.",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "photoAssetId": {
+          "type": "string",
+          "description": "Winner avatar MediaAsset ID or empty string.",
+          "maxLength": 128
+        },
+        "eligibleEarnings": {
+          "type": "number",
+          "description": "Finalized monthly eligible earnings in BDT."
+        },
+        "approvedTaskCount": {
+          "type": "number",
+          "description": "Finalized monthly approved task count."
+        },
+        "reachedAtMs": {
+          "type": "number",
+          "description": "Epoch milliseconds when final eligible total was reached."
+        },
+        "prizeTitle": {
+          "type": "string",
+          "description": "Assigned prize title.",
+          "maxLength": 160
+        },
+        "prizeDescription": {
+          "type": "string",
+          "description": "Assigned prize description.",
+          "maxLength": 500
+        },
+        "monetaryValue": {
+          "type": "number",
+          "description": "Assigned optional monetary prize value in BDT."
+        },
+        "rewardStatus": {
+          "type": "string",
+          "description": "Reward fulfillment lifecycle state.",
+          "enum": ["pending", "approved", "awarded", "cancelled"],
+          "maxLength": 15
+        },
+        "deliveredAt": {
+          "type": "string",
+          "description": "Delivery timestamp/date recorded by Main Admin, or empty string.",
+          "maxLength": 40
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Snapshot creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last status update timestamp."
+        }
+      },
+      "required": [
+        "winnerId",
+        "monthKey",
+        "rank",
+        "userId",
+        "displayName",
+        "photoAssetId",
+        "eligibleEarnings",
+        "approvedTaskCount",
+        "reachedAtMs",
+        "prizeTitle",
+        "prizeDescription",
+        "monetaryValue",
+        "rewardStatus",
+        "deliveredAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "LeaderboardWinnerAdminMeta": {
+      "title": "LeaderboardWinnerAdminMeta",
+      "description": "Main Admin-exclusive private fulfillment notes and member code reference for finalized Best 10 winners.",
+      "type": "object",
+      "properties": {
+        "winnerId": {
+          "type": "string",
+          "description": "Matching winnerId (${monthKey}_${01..10}).",
+          "minLength": 10,
+          "maxLength": 20
+        },
+        "monthKey": {
+          "type": "string",
+          "description": "Calendar month key (YYYY-MM).",
+          "minLength": 7,
+          "maxLength": 7
+        },
+        "rank": {
+          "type": "number",
+          "description": "Position (1 to 10)."
+        },
+        "userId": {
+          "type": "string",
+          "description": "Winner UID.",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "memberId": {
+          "type": "string",
+          "description": "Winner human-readable member ID.",
+          "minLength": 6,
+          "maxLength": 20
+        },
+        "adminNote": {
+          "type": "string",
+          "description": "Internal Main Admin delivery/fulfillment note.",
+          "maxLength": 1000
+        },
+        "updatedBy": {
+          "type": "string",
+          "description": "Main Admin UID who last updated delivery metadata.",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Update server timestamp."
+        }
+      },
+      "required": [
+        "winnerId",
+        "monthKey",
+        "rank",
+        "userId",
+        "memberId",
+        "adminNote",
+        "updatedBy",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -1182,7 +1562,7 @@
     },
     "/transactions/{transactionId}": {
       "schema": { "$ref": "#/entities/WalletTransaction" },
-      "description": "Immutable ledger history of official rewards, custom task rewards, withdrawal deductions, payouts, and refunds."
+      "description": "Immutable ledger history of official rewards, custom task rewards, reversals, withdrawal deductions, payouts, and refunds."
     },
     "/withdrawals/{withdrawalId}": {
       "schema": { "$ref": "#/entities/WithdrawalRequest" },
@@ -1195,6 +1575,22 @@
     "/adminAuditLogs/{logId}": {
       "schema": { "$ref": "#/entities/AdminAuditLog" },
       "description": "Append-only audit log of all privileged Main Admin and Assistant Admin operations."
+    },
+    "/monthlyMemberEarnings/{entryId}": {
+      "schema": { "$ref": "#/entities/MonthlyMemberEarning" },
+      "description": "Public-safe, non-PII monthly eligible earnings tallies per member in Asia/Dhaka (UTC+6)."
+    },
+    "/leaderboardPeriods/{monthKey}": {
+      "schema": { "$ref": "#/entities/LeaderboardPeriod" },
+      "description": "Monthly Best 10 reward configurations, publication state, and finalization lock."
+    },
+    "/leaderboardWinners/{winnerId}": {
+      "schema": { "$ref": "#/entities/LeaderboardWinner" },
+      "description": "Archived finalized Best 10 monthly winner records (positions 1-10, zero PII)."
+    },
+    "/leaderboardAdminNotes/{winnerId}": {
+      "schema": { "$ref": "#/entities/LeaderboardWinnerAdminMeta" },
+      "description": "Main Admin-exclusive private delivery notes and member code records for Best 10 winners."
     }
   }
 }

@@ -253,6 +253,40 @@ export async function queryByUserFieldRest<T = Record<string, unknown>>(
   return results;
 }
 
+export async function listCollectionRest<T = Record<string, unknown>>(
+  collectionName: string,
+  idToken: string,
+  limit = 2500
+): Promise<DecodedFirestoreDoc<T>[]> {
+  const res = await fetch(`${REST_BASE}:runQuery`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      structuredQuery: {
+        from: [{ collectionId: collectionName }],
+        limit,
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw parseFirestoreHttpError(res.status, errBody);
+  }
+
+  const rows = (await res.json()) as Array<{ document?: FirestoreRawDoc }>;
+  const results: DecodedFirestoreDoc<T>[] = [];
+  for (const row of rows) {
+    if (row.document) {
+      results.push(decodeDoc<T>(row.document));
+    }
+  }
+  return results;
+}
+
 export interface RestWriteOperation {
   update?: {
     name: string;
@@ -347,7 +381,10 @@ async function commitWritesRest(idToken: string, writes: RestWriteOperation[]): 
 }
 
 export async function commitSingleOrBatchWrites(idToken: string, writes: RestWriteOperation[]): Promise<void> {
-  await commitWritesRest(idToken, writes);
+  const chunkSize = 400;
+  for (let i = 0; i < writes.length; i += chunkSize) {
+    await commitWritesRest(idToken, writes.slice(i, i + chunkSize));
+  }
 }
 
 export async function runAtomicTransaction<R>(

@@ -16,6 +16,7 @@ import {
   LogOut,
   Send,
   ShieldCheck,
+  Trophy,
   UserCheck,
   UserCircle2,
   Users,
@@ -47,6 +48,7 @@ import {
   MemberWithdrawView,
   ProofSubmissionsView,
 } from './components/MemberViews';
+import { Best10View } from './components/Best10View';
 import { AdminPanel, AdminTab } from './components/AdminPanel';
 import { AssistantAdminPanel, AssistantAdminTab } from './components/AssistantAdminPanel';
 import { AvatarDisplay } from './components/MediaView';
@@ -133,6 +135,7 @@ function AdminOnlyWorkspace({
     icon: React.ComponentType<{ className?: string }>;
   }[] = [
     { id: 'overview', label: 'Overview', icon: ShieldCheck },
+    { id: 'best_10', label: 'Best 10 Leaderboard', icon: Trophy },
     { id: 'members', label: 'Members', icon: Users },
     { id: 'assistants', label: 'Assistant Admins', icon: UserCheck },
     { id: 'tasks', label: 'Manage Tasks', icon: Layers },
@@ -254,7 +257,8 @@ function AdminOnlyWorkspace({
           const Icon = tab.icon;
           const isActive =
             adminTab === tab.id ||
-            (tab.id === 'overview' && (adminTab === 'tasks' || adminTab === 'assistants'));
+            (tab.id === 'overview' &&
+              (adminTab === 'tasks' || adminTab === 'assistants' || adminTab === 'best_10'));
           return (
             <button
               key={tab.id}
@@ -528,6 +532,7 @@ function MemberOnlyWorkspace({
     icon: React.ComponentType<{ className?: string }>;
   }[] = [
     { id: 'home', label: 'Dashboard', icon: Home },
+    { id: 'best_10', label: 'Best 10', icon: Trophy },
     { id: 'tasks', label: 'Available Tasks', icon: Layers },
     { id: 'custom_task', label: 'Custom Task Submission', icon: FilePlus2 },
     { id: 'completed', label: 'Completed Tasks', icon: Award },
@@ -612,6 +617,19 @@ function MemberOnlyWorkspace({
         </button>
 
         <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={() => setActiveTab('best_10')}
+            className={`min-h-[36px] px-2.5 rounded-lg border text-xs font-semibold inline-flex items-center gap-1 transition-colors whitespace-nowrap ${
+              activeTab === 'best_10'
+                ? 'bg-amber-400 text-slate-950 border-amber-300'
+                : 'bg-amber-400/15 hover:bg-amber-400/25 border-amber-400/35 text-amber-200'
+            }`}
+            aria-label="Open Best 10 Monthly Leaderboard"
+          >
+            <Trophy className="w-3.5 h-3.5" />
+            <span>Best 10</span>
+          </button>
           <PWAInstallButton compact />
           <button
             type="button"
@@ -630,7 +648,9 @@ function MemberOnlyWorkspace({
 
       {/* Main Responsive Content Container */}
       <main className="flex-1 w-full max-w-6xl mx-auto px-4 py-5 sm:px-6 lg:px-8 lg:py-8 pb-24 lg:pb-10">
-        {activeTab === 'tasks' ? (
+        {activeTab === 'best_10' ? (
+          <Best10View currentUserUid={profile.uid} onNavigate={setActiveTab} />
+        ) : activeTab === 'tasks' ? (
           <MemberTasksView tasks={tasks} submissions={submissions} onNavigate={setActiveTab} />
         ) : activeTab === 'custom_task' ? (
           <CustomTaskSubmissionView
