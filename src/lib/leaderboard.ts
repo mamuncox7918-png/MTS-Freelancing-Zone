@@ -421,3 +421,92 @@ export function computeMonthlyLeaderboardFromTransactions(
     reversedReferenceIds,
   };
 }
+
+export interface UnreversedRewardSummary {
+  rewards: WalletTransaction[];
+  allRewards: WalletTransaction[];
+  officialRewards: WalletTransaction[];
+  customRewards: WalletTransaction[];
+  completedTaskIds: Set<string>;
+  completedTaskCodes: Set<string>;
+  reversedReferenceIds: Set<string>;
+}
+
+/**
+ * Extracts deduplicated, unreversed `task_reward` and `custom_task_reward` credit transactions,
+ * along with the sets of completed official `taskId`s and `taskCode`s (including regex fallback
+ * for historical `TSK-XXXXX` / `CTK-XXXXX` descriptions) so approved task submissions never
+ * need to remain stored in `submissions` or `customTasks`.
+ */
+export function getUnreversedRewardTransactions(
+  transactions: WalletTransaction[]
+): UnreversedRewardSummary {
+  const reversedReferenceIds = new Set<string>();
+  for (const tx of transactions) {
+    if (tx && tx.type === 'earning_reversal' && tx.referenceId) {
+      reversedReferenceIds.add(tx.referenceId);
+    }
+  }
+
+  const seenTxIds = new Set<string>();
+  const seenRefKeys = new Set<string>();
+  const rewards: WalletTransaction[] = [];
+  const completedTaskIds = new Set<string>();
+  const completedTaskCodes = new Set<string>();
+
+  for (const tx of transactions) {
+    if (!tx || !tx.transactionId || !tx.userId || !tx.referenceId) continue;
+    if (tx.type !== 'task_reward' && tx.type !== 'custom_task_reward') continue;
+    if (tx.direction !== 'credit') continue;
+
+    const amount = Number(tx.amount);
+    if (!Number.isFinite(amount) || amount <= 0) continue;
+
+    const subRef = tx.submissionId || tx.referenceId;
+    if (reversedReferenceIds.has(tx.referenceId) || reversedReferenceIds.has(subRef)) {
+      continue;
+    }
+
+    if (seenTxIds.has(tx.transactionId)) continue;
+    const refKey = `${tx.type}:${subRef}`;
+    if (seenRefKeys.has(refKey)) continue;
+
+    seenTxIds.add(tx.transactionId);
+    seenRefKeys.add(refKey);
+    rewards.push(tx);
+
+    if (tx.type === 'task_reward') {
+      if (tx.taskId) {
+        completedTaskIds.add(tx.taskId);
+      }
+      if (tx.taskCode) {
+        completedTaskCodes.add(tx.taskCode);
+      } else if (tx.description) {
+        const match = tx.description.match(/\b(TSK-\d{4,6})\b/);
+        if (match && match[1]) {
+          completedTaskCodes.add(match[1]);
+        }
+      }
+    }
+  }
+
+  rewards.sort((a, b) => {
+    const bMs = extractTimestampMs(b.approvedAt) || extractTimestampMs(b.createdAt);
+    const aMs = extractTimestampMs(a.approvedAt) || extractTimestampMs(a.createdAt);
+    return bMs - aMs;
+  });
+
+  const officialRewards = rewards.filter((tx) => tx.type === 'task_reward');
+  const customRewards = rewards.filter((tx) => tx.type === 'custom_task_reward');
+
+  return {
+    rewards,
+    allRewards: rewards,
+    officialRewards,
+    customRewards,
+    completedTaskIds,
+    completedTaskCodes,
+    reversedReferenceIds,
+  };
+}
+

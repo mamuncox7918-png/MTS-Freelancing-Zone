@@ -7,6 +7,7 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import {
   BOOTSTRAPPED_ADMIN_EMAIL,
   HttpError,
+  type RestWriteOperation,
   type VerifiedAuthUser,
   buildCreateWrite,
   buildDeleteWrite,
@@ -27,6 +28,7 @@ import {
   createEmptyRewardConfigs,
   extractTimestampMs,
   getDhakaMonthKey,
+  getUnreversedRewardTransactions,
   isValidMonthKey,
   normalizeRewardConfigs,
 } from './src/lib/leaderboard.ts';
@@ -461,8 +463,11 @@ async function startServer() {
         throw new HttpError(400, 'Enter a valid proof link URL (e.g., https://facebook.com/...).');
       }
 
-      // Check existing submissions for this member to block duplicate pending/approved submissions
-      const memberSubmissions = await queryByUserFieldRest('submissions', 'userId', user.uid, user.idToken);
+      // Check existing submissions and reward ledger for this member to block duplicate pending/approved submissions
+      const [memberSubmissions, memberTransactions] = await Promise.all([
+        queryByUserFieldRest('submissions', 'userId', user.uid, user.idToken),
+        queryByUserFieldRest<WalletTransaction>('transactions', 'userId', user.uid, user.idToken),
+      ]);
       const duplicate = memberSubmissions.find(
         (s) => s.data.taskId === taskId && (s.data.status === 'pending' || s.data.status === 'approved')
       );
@@ -473,6 +478,16 @@ async function startServer() {
             ? 'You have already completed and received the reward for this task.'
             : 'You already have a proof submission pending Admin review for this task.'
         );
+      }
+
+      const rewardSummary = getUnreversedRewardTransactions(
+        memberTransactions.map((t) => ({
+          ...t.data,
+          transactionId: String(t.data.transactionId || t.raw.name.split('/').pop() || ''),
+        }))
+      );
+      if (rewardSummary.completedTaskIds.has(taskId)) {
+        throw new HttpError(409, 'You have already completed and received the reward for this task.');
       }
 
       const submissionId = generateDocId('sub');
@@ -486,6 +501,11 @@ async function startServer() {
         const task = await tx.get('tasks', taskId);
         if (!task || task.data.isActive !== true) {
           throw new HttpError(400, 'This task is no longer active.');
+        }
+
+        const taskCodeStr = String(task.data.taskCode || '');
+        if (taskCodeStr && rewardSummary.completedTaskCodes.has(taskCodeStr)) {
+          throw new HttpError(409, 'You have already completed and received the reward for this task.');
         }
 
         const asset = await tx.get('mediaAssets', screenshotAssetId);
@@ -1084,8 +1104,10 @@ async function startServer() {
 
           const memberUid = String(submission.data.userId);
           const memberCode = String(submission.data.memberId || 'MTS-000000');
+          const taskId = String(submission.data.taskId || '').trim();
           const taskTitle = String(submission.data.taskTitle || 'Official Task').slice(0, 400);
-          const taskCode = String(submission.data.taskCode || 'TSK-00000');
+          const taskCode = String(submission.data.taskCode || 'TSK-00000').slice(0, 20);
+          const screenshotAssetId = String(submission.data.screenshotAssetId || '').trim();
           const rewardAmount = Number(submission.data.rewardAmount);
 
           const nowMs = Date.parse(nowIso);
@@ -1102,27 +1124,15 @@ async function startServer() {
 
           const logId = generateDocId('log');
           const notifId = generateDocId('ntf');
-          const writes = [
-            buildReplaceUpdateWrite(
-              'submissions',
-              submissionId,
-              {
-                ...submission.data,
-                status: decision,
-                rejectionReason,
-                reviewedBy: reviewerAuth.uid,
-                reviewerId: reviewerInfo.reviewerId,
-                reviewerName: reviewerInfo.reviewerName,
-                reviewerRole: reviewerInfo.role,
-                reviewAction: decision,
-                reviewedAt: nowIso,
-                createdAt: preserveTimestamp(submission.raw, 'createdAt'),
-              },
-              submission.updateTime
-            ),
-          ];
+          const writes: RestWriteOperation[] = [];
 
           if (decision === 'approved') {
+            // Delete approved submission and its heavy proof screenshot immediately to conserve Firestore quota
+            writes.push(buildDeleteWrite('submissions', submissionId));
+            if (screenshotAssetId && VALID_ID_REGEX.test(screenshotAssetId)) {
+              writes.push(buildDeleteWrite('mediaAssets', screenshotAssetId));
+            }
+
             // Deterministic ledger ID prevents duplicate wallet credits for the same submission
             const txLedgerId = `tx_reward_${submissionId}`;
 
@@ -1256,6 +1266,8 @@ async function startServer() {
                   direction: 'credit',
                   description: `Task reward credited for ${taskCode} (${taskTitle.slice(0, 140)})`.slice(0, 240),
                   referenceId: submissionId,
+                  ...(taskId && VALID_ID_REGEX.test(taskId) ? { taskId } : {}),
+                  taskCode,
                   taskName: taskTitle,
                   submissionId,
                   approvedAt: nowIso,
@@ -1289,7 +1301,7 @@ async function startServer() {
                   action: 'SUBMISSION_APPROVED',
                   targetType: 'submission',
                   targetId: submissionId,
-                  summary: `[${reviewerInfo.role === 'admin' ? 'Main Admin' : 'Assistant Admin'} ${reviewerInfo.reviewerId}] Approved proof for ${taskCode} by ${memberCode} and credited ৳${rewardAmount}`.slice(
+                  summary: `[${reviewerInfo.role === 'admin' ? 'Main Admin' : 'Assistant Admin'} ${reviewerInfo.reviewerId}] Approved proof for ${taskCode} by ${memberCode}, credited ৳${rewardAmount}, and cleared proof storage`.slice(
                     0,
                     450
                   ),
@@ -1298,6 +1310,26 @@ async function startServer() {
               )
             );
           } else {
+            writes.push(
+              buildReplaceUpdateWrite(
+                'submissions',
+                submissionId,
+                {
+                  ...submission.data,
+                  status: 'rejected',
+                  rejectionReason,
+                  reviewedBy: reviewerAuth.uid,
+                  reviewerId: reviewerInfo.reviewerId,
+                  reviewerName: reviewerInfo.reviewerName,
+                  reviewerRole: reviewerInfo.role,
+                  reviewAction: 'rejected',
+                  reviewedAt: nowIso,
+                  createdAt: preserveTimestamp(submission.raw, 'createdAt'),
+                },
+                submission.updateTime
+              )
+            );
+
             if (memberProfile) {
               const prevPending = Number(memberProfile.data.pendingSubmissionsCount || 0);
               writes.push(
@@ -2124,7 +2156,8 @@ async function startServer() {
           const memberUid = String(customTask.data.userId);
           const memberCode = String(customTask.data.memberId || 'MTS-000000');
           const taskName = String(customTask.data.taskName || 'Custom Task').slice(0, 400);
-          const customCode = String(customTask.data.customTaskCode || 'CTK-00000');
+          const customCode = String(customTask.data.customTaskCode || 'CTK-00000').slice(0, 20);
+          const screenshotAssetId = String(customTask.data.screenshotAssetId || '').trim();
           const requestedAmount = Number(customTask.data.requestedAmount);
 
           const finalApprovedAmount =
@@ -2160,27 +2193,15 @@ async function startServer() {
           const notifId = generateDocId('ntf');
           const logId = generateDocId('log');
 
-          const writes = [
-            buildReplaceUpdateWrite(
-              'customTasks',
-              customTaskId,
-              {
-                ...customTask.data,
-                status: decision,
-                approvedAmount: finalApprovedAmount,
-                rejectionReason: decision === 'rejected' ? rawReason : '',
-                reviewedBy: admin.uid,
-                reviewerId: adminInfo.reviewerId,
-                reviewerName: adminInfo.reviewerName,
-                reviewedAt: nowIso,
-                transactionId: txLedgerId,
-                createdAt: preserveTimestamp(customTask.raw, 'createdAt'),
-              },
-              customTask.updateTime
-            ),
-          ];
+          const writes: RestWriteOperation[] = [];
 
           if (decision === 'approved') {
+            // Delete approved custom task and optional proof screenshot immediately to conserve Firestore quota
+            writes.push(buildDeleteWrite('customTasks', customTaskId));
+            if (screenshotAssetId && VALID_ID_REGEX.test(screenshotAssetId)) {
+              writes.push(buildDeleteWrite('mediaAssets', screenshotAssetId));
+            }
+
             if (memberWallet) {
               const prevAvail = Number(memberWallet.data.availableBalance || 0);
               const prevWalletEarnings = Number(memberWallet.data.totalEarnings || 0);
@@ -2309,6 +2330,7 @@ async function startServer() {
                   direction: 'credit',
                   description: `Custom task payment credited for ${customCode} (${taskName.slice(0, 140)})`.slice(0, 240),
                   referenceId: customTaskId,
+                  taskCode: customCode,
                   taskName,
                   submissionId: customTaskId,
                   approvedAt: nowIso,
@@ -2342,7 +2364,7 @@ async function startServer() {
                   action: 'CUSTOM_TASK_APPROVED',
                   targetType: 'customTask',
                   targetId: customTaskId,
-                  summary: `Approved custom task ${customCode} ("${taskName}") for ${memberCode} and credited ৳${finalApprovedAmount}`.slice(
+                  summary: `Approved custom task ${customCode} ("${taskName}") for ${memberCode}, credited ৳${finalApprovedAmount}, and cleared task storage`.slice(
                     0,
                     450
                   ),
@@ -2352,6 +2374,23 @@ async function startServer() {
             );
           } else {
             writes.push(
+              buildReplaceUpdateWrite(
+                'customTasks',
+                customTaskId,
+                {
+                  ...customTask.data,
+                  status: 'rejected',
+                  approvedAmount: 0,
+                  rejectionReason: rawReason,
+                  reviewedBy: admin.uid,
+                  reviewerId: adminInfo.reviewerId,
+                  reviewerName: adminInfo.reviewerName,
+                  reviewedAt: nowIso,
+                  transactionId: '',
+                  createdAt: preserveTimestamp(customTask.raw, 'createdAt'),
+                },
+                customTask.updateTime
+              ),
               buildCreateWrite(
                 'notifications',
                 notifId,
@@ -3674,6 +3713,88 @@ async function startServer() {
       }
     }
   );
+
+  // 16. Main Admin: Purge Legacy Approved Submissions & Proof Screenshots
+  app.post(
+    '/api/admin/submissions/purge-approved',
+    requireVerifiedAuth,
+    async (req: AuthedRequest, res: Response, next: NextFunction) => {
+      try {
+        const admin = req.authUser!;
+        await assertCallerIsAdmin(admin);
+
+        const [approvedSubs, approvedCustom] = await Promise.all([
+          queryByUserFieldRest('submissions', 'status', 'approved', admin.idToken),
+          queryByUserFieldRest('customTasks', 'status', 'approved', admin.idToken),
+        ]);
+
+        const writes: RestWriteOperation[] = [];
+        const seenAssetIds = new Set<string>();
+        let deletedSubmissions = 0;
+        let deletedCustomTasks = 0;
+
+        for (const sub of approvedSubs) {
+          const docId = String(sub.data.submissionId || sub.raw.name.split('/').pop() || '');
+          if (docId && VALID_ID_REGEX.test(docId)) {
+            deletedSubmissions += 1;
+            writes.push(buildDeleteWrite('submissions', docId));
+          }
+          const assetId = String(sub.data.screenshotAssetId || '').trim();
+          if (assetId && VALID_ID_REGEX.test(assetId) && !seenAssetIds.has(assetId)) {
+            seenAssetIds.add(assetId);
+            writes.push(buildDeleteWrite('mediaAssets', assetId));
+          }
+        }
+
+        for (const ct of approvedCustom) {
+          const docId = String(ct.data.customTaskId || ct.raw.name.split('/').pop() || '');
+          if (docId && VALID_ID_REGEX.test(docId)) {
+            deletedCustomTasks += 1;
+            writes.push(buildDeleteWrite('customTasks', docId));
+          }
+          const assetId = String(ct.data.screenshotAssetId || '').trim();
+          if (assetId && VALID_ID_REGEX.test(assetId) && !seenAssetIds.has(assetId)) {
+            seenAssetIds.add(assetId);
+            writes.push(buildDeleteWrite('mediaAssets', assetId));
+          }
+        }
+
+        if (writes.length > 0) {
+          const logId = generateDocId('log');
+          writes.push(
+            buildCreateWrite(
+              'adminAuditLogs',
+              logId,
+              {
+                logId,
+                adminUid: admin.uid,
+                adminEmail: admin.email,
+                action: 'APPROVED_SUBMISSIONS_PURGED',
+                targetType: 'system',
+                targetId: 'approved_cleanup',
+                summary: `Purged ${deletedSubmissions} approved official submission(s), ${deletedCustomTasks} approved custom task(s), and ${seenAssetIds.size} proof screenshot(s) to conserve Firestore quota.`.slice(
+                  0,
+                  450
+                ),
+              },
+              ['createdAt']
+            )
+          );
+          await commitSingleOrBatchWrites(admin.idToken, writes);
+        }
+
+        res.json({
+          ok: true,
+          deletedSubmissions,
+          deletedCustomTasks,
+          deletedMediaAssets: seenAssetIds.size,
+        });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
 
   // Express Error Handler for API routes
   app.use('/api', (err: unknown, _req: Request, res: Response, _next: NextFunction) => {

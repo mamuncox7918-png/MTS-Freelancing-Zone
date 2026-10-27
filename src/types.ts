@@ -156,6 +156,8 @@ export interface WalletTransaction {
   direction: 'credit' | 'debit' | 'settlement';
   description: string;
   referenceId: string;
+  taskId?: string;
+  taskCode?: string;
   taskName?: string;
   submissionId?: string;
   approvedAt?: string;

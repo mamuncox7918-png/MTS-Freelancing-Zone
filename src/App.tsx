@@ -651,16 +651,30 @@ function MemberOnlyWorkspace({
         {activeTab === 'best_10' ? (
           <Best10View currentUserUid={profile.uid} onNavigate={setActiveTab} />
         ) : activeTab === 'tasks' ? (
-          <MemberTasksView tasks={tasks} submissions={submissions} onNavigate={setActiveTab} />
+          <MemberTasksView
+            tasks={tasks}
+            submissions={submissions}
+            transactions={transactions}
+            onNavigate={setActiveTab}
+          />
         ) : activeTab === 'custom_task' ? (
           <CustomTaskSubmissionView
             customTasks={customTasks}
             notifications={notifications}
+            transactions={transactions}
           />
         ) : activeTab === 'completed' ? (
-          <CompletedTasksView submissions={submissions} onNavigate={setActiveTab} />
+          <CompletedTasksView
+            submissions={submissions}
+            transactions={transactions}
+            onNavigate={setActiveTab}
+          />
         ) : activeTab === 'proof' ? (
-          <ProofSubmissionsView submissions={submissions} onNavigate={setActiveTab} />
+          <ProofSubmissionsView
+            submissions={submissions}
+            transactions={transactions}
+            onNavigate={setActiveTab}
+          />
         ) : activeTab === 'wallet' ? (
           <MemberWalletView
             wallet={wallet}
@@ -678,6 +692,7 @@ function MemberOnlyWorkspace({
             profile={profile}
             wallet={wallet}
             submissions={submissions}
+            transactions={transactions}
             passwordRequests={passwordRequests}
             onLogout={onLogout}
           />

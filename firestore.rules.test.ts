@@ -7,6 +7,7 @@ import {
 } from '@firebase/rules-unit-testing';
 import {
   doc,
+  deleteDoc,
   getDoc,
   setDoc,
   updateDoc,
@@ -361,7 +362,10 @@ export async function runFirestoreRulesAudit(emulatorHost = '127.0.0.1', emulato
       })
     );
 
-    // Dirty Dozen #8: Duplicate approval of already-approved submission
+    // Dirty Dozen #8: Uncredited submission/proof deletion & duplicate in-place approval
+    await assertFails(deleteDoc(doc(assistantDb, 'submissions', 'sub_pending_1')));
+    await assertFails(deleteDoc(doc(assistantDb, 'mediaAssets', 'avatar_m1')));
+    await assertFails(deleteDoc(doc(assistantDb, 'mediaAssets', 'asset_m1')));
     await assertFails(
       updateDoc(doc(realAdminDb, 'submissions', 'sub_done'), {
         status: 'approved',
@@ -481,20 +485,11 @@ export async function runFirestoreRulesAudit(emulatorHost = '127.0.0.1', emulato
       })
     );
 
-    // Positive Assertion B: Assistant Admin atomic single-credit approval on official task submission
+    // Positive Assertion B: Assistant Admin atomic single-credit approval & auto-deletion of submission + proof screenshot
     const assistantBatch = writeBatch(assistantDb);
     const nowIso = new Date().toISOString();
-    assistantBatch.update(doc(assistantDb, 'submissions', 'sub_pending_1'), {
-      status: 'approved',
-      rejectionReason: '',
-      reviewedBy: 'assistant_1',
-      reviewerId: 'MTS-900001',
-      reviewerName: 'Assistant Reviewer One',
-      reviewerRole: 'assistant_admin',
-      reviewAction: 'approved',
-      reviewedAt: nowIso,
-      updatedAt: serverTimestamp(),
-    });
+    assistantBatch.delete(doc(assistantDb, 'submissions', 'sub_pending_1'));
+    assistantBatch.delete(doc(assistantDb, 'mediaAssets', 'asset_m1'));
     assistantBatch.update(doc(assistantDb, 'wallets', 'member_1'), {
       availableBalance: 220,
       totalEarnings: 220,
@@ -518,6 +513,8 @@ export async function runFirestoreRulesAudit(emulatorHost = '127.0.0.1', emulato
       direction: 'credit',
       description: 'Task reward credited for TSK-10001',
       referenceId: 'sub_pending_1',
+      taskId: 'tsk_1',
+      taskCode: 'TSK-10001',
       taskName: 'Official Channel Subscription',
       submissionId: 'sub_pending_1',
       approvedAt: nowIso,
@@ -539,6 +536,9 @@ export async function runFirestoreRulesAudit(emulatorHost = '127.0.0.1', emulato
       updatedAt: serverTimestamp(),
     });
     await assertSucceeds(assistantBatch.commit());
+
+    // Positive Assertion C: Main Admin can purge legacy approved submissions
+    await assertSucceeds(deleteDoc(doc(realAdminDb, 'submissions', 'sub_done')));
   } finally {
     await testEnv.cleanup();
   }

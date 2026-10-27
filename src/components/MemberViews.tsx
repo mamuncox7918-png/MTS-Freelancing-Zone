@@ -31,7 +31,11 @@ import {
   XCircle,
 } from 'lucide-react';
 import { auth } from '../lib/firebase';
-import { getDhakaMonthBounds, getDhakaMonthKey } from '../lib/leaderboard';
+import {
+  getDhakaMonthBounds,
+  getDhakaMonthKey,
+  getUnreversedRewardTransactions,
+} from '../lib/leaderboard';
 import {
   apiRequest,
   formatBdt,
@@ -98,14 +102,16 @@ export function MemberDashboardView({
     [notifications]
   );
 
+  const rewardSummary = useMemo(
+    () => getUnreversedRewardTransactions(transactions),
+    [transactions]
+  );
+
   const pendingCustomCount = useMemo(
     () => customTasks.filter((c) => c.status === 'pending').length,
     [customTasks]
   );
-  const approvedCustomCount = useMemo(
-    () => customTasks.filter((c) => c.status === 'approved').length,
-    [customTasks]
-  );
+  const approvedCustomCount = rewardSummary.customRewards.length;
 
   const handleDismissNotification = async (notificationId: string) => {
     setMarkingNotifId(notificationId);
@@ -123,8 +129,8 @@ export function MemberDashboardView({
     [submissions]
   );
   const completedCount = useMemo(
-    () => submissions.filter((s) => s.status === 'approved').length,
-    [submissions]
+    () => Math.max(Number(profile.completedTasksCount || 0), rewardSummary.allRewards.length),
+    [profile.completedTasksCount, rewardSummary.allRewards.length]
   );
 
   const openTasksPreview = useMemo(() => {
@@ -133,8 +139,16 @@ export function MemberDashboardView({
         .filter((s) => s.status === 'pending' || s.status === 'approved')
         .map((s) => s.taskId)
     );
-    return tasks.filter((t) => t.isActive && !blockedTaskIds.has(t.taskId)).slice(0, 4);
-  }, [tasks, submissions]);
+    return tasks
+      .filter(
+        (t) =>
+          t.isActive &&
+          !blockedTaskIds.has(t.taskId) &&
+          !rewardSummary.completedTaskIds.has(t.taskId) &&
+          !rewardSummary.completedTaskCodes.has(t.taskCode)
+      )
+      .slice(0, 4);
+  }, [tasks, submissions, rewardSummary]);
 
   const recentTransactions = useMemo(() => transactions.slice(0, 5), [transactions]);
   const currentDhakaMonth = useMemo(() => getDhakaMonthBounds(getDhakaMonthKey()), []);
@@ -509,10 +523,12 @@ export function MemberDashboardView({
 export function MemberTasksView({
   tasks,
   submissions,
+  transactions,
   onNavigate,
 }: {
   tasks: TaskItem[];
   submissions: TaskSubmission[];
+  transactions: WalletTransaction[];
   onNavigate: (tab: MemberPageTab) => void;
 }) {
   const [searchQuery, setSearchQuery] = useState('');
@@ -524,6 +540,11 @@ export function MemberTasksView({
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const rewardSummary = useMemo(
+    () => getUnreversedRewardTransactions(transactions),
+    [transactions]
+  );
 
   const submissionByTask = useMemo(() => {
     const map = new Map<string, TaskSubmission>();
@@ -665,9 +686,12 @@ export function MemberTasksView({
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {activeTasks.map((task) => {
             const latestSub = submissionByTask.get(task.taskId);
-            const isApproved = latestSub?.status === 'approved';
-            const isPending = latestSub?.status === 'pending';
-            const isRejected = latestSub?.status === 'rejected';
+            const isApproved =
+              latestSub?.status === 'approved' ||
+              rewardSummary.completedTaskIds.has(task.taskId) ||
+              rewardSummary.completedTaskCodes.has(task.taskCode);
+            const isPending = !isApproved && latestSub?.status === 'pending';
+            const isRejected = !isApproved && latestSub?.status === 'rejected';
 
             return (
               <article
@@ -875,9 +899,11 @@ export function MemberTasksView({
 export function CustomTaskSubmissionView({
   customTasks,
   notifications,
+  transactions,
 }: {
   customTasks: CustomTaskSubmission[];
   notifications: MemberNotification[];
+  transactions: WalletTransaction[];
 }) {
   const [taskName, setTaskName] = useState('');
   const [taskDetails, setTaskDetails] = useState('');
@@ -903,20 +929,63 @@ export function CustomTaskSubmissionView({
     [notifications]
   );
 
+  const combinedHistory = useMemo(() => {
+    const rewardSummary = getUnreversedRewardTransactions(transactions);
+    const activeNonApproved = customTasks.filter((c) => c.status !== 'approved');
+    const seenIds = new Set(activeNonApproved.map((c) => c.customTaskId));
+    const ledgerApproved: CustomTaskSubmission[] = rewardSummary.customRewards
+      .filter((tx) => !seenIds.has(tx.submissionId || tx.referenceId))
+      .map((tx) => {
+        const refId = tx.submissionId || tx.referenceId;
+        const codeMatch = tx.description?.match(/CTK-\d{4,6}/)?.[0];
+        return {
+          customTaskId: refId,
+          customTaskCode: tx.taskCode || codeMatch || 'CTK-PAID',
+          userId: tx.userId,
+          memberId: tx.memberId,
+          memberName: '',
+          taskName: tx.taskName || tx.description || 'Approved Custom Task',
+          taskDetails: 'Approved & credited to wallet (submission proof auto-cleared).',
+          requestedAmount: tx.amount,
+          approvedAmount: tx.amount,
+          screenshotAssetId: '',
+          status: 'approved',
+          assistantStatus: 'reviewed',
+          assistantNote: '',
+          assistantReviewedBy: '',
+          assistantReviewerId: '',
+          assistantReviewerName: '',
+          assistantReviewedAt: '',
+          rejectionReason: '',
+          reviewedBy: '',
+          reviewerId: 'ADMIN',
+          reviewerName: 'Main Admin',
+          reviewedAt: tx.approvedAt || '',
+          transactionId: tx.transactionId,
+          createdAt: tx.approvedAt || tx.createdAt,
+          updatedAt: tx.approvedAt || tx.createdAt,
+        };
+      });
+
+    return [...activeNonApproved, ...ledgerApproved].sort(
+      (a, b) => toMillis(b.createdAt) - toMillis(a.createdAt)
+    );
+  }, [customTasks, transactions]);
+
   const counts = useMemo(
     () => ({
-      all: customTasks.length,
-      pending: customTasks.filter((c) => c.status === 'pending').length,
-      approved: customTasks.filter((c) => c.status === 'approved').length,
-      rejected: customTasks.filter((c) => c.status === 'rejected').length,
+      all: combinedHistory.length,
+      pending: combinedHistory.filter((c) => c.status === 'pending').length,
+      approved: combinedHistory.filter((c) => c.status === 'approved').length,
+      rejected: combinedHistory.filter((c) => c.status === 'rejected').length,
     }),
-    [customTasks]
+    [combinedHistory]
   );
 
   const filteredHistory = useMemo(() => {
-    if (historyFilter === 'all') return customTasks;
-    return customTasks.filter((c) => c.status === historyFilter);
-  }, [customTasks, historyFilter]);
+    if (historyFilter === 'all') return combinedHistory;
+    return combinedHistory.filter((c) => c.status === historyFilter);
+  }, [combinedHistory, historyFilter]);
 
   const handleSelectProof = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1341,20 +1410,21 @@ export function CustomTaskSubmissionView({
 // 3. Dedicated Completed Tasks Page
 // ============================================================================
 export function CompletedTasksView({
-  submissions,
+  transactions,
   onNavigate,
 }: {
-  submissions: TaskSubmission[];
+  submissions?: TaskSubmission[];
+  transactions: WalletTransaction[];
   onNavigate: (tab: MemberPageTab) => void;
 }) {
-  const approvedSubmissions = useMemo(
-    () => submissions.filter((s) => s.status === 'approved'),
-    [submissions]
+  const rewardSummary = useMemo(
+    () => getUnreversedRewardTransactions(transactions),
+    [transactions]
   );
 
   const totalEarnedFromTasks = useMemo(
-    () => approvedSubmissions.reduce((acc, s) => acc + Number(s.rewardAmount || 0), 0),
-    [approvedSubmissions]
+    () => rewardSummary.allRewards.reduce((acc, tx) => acc + Number(tx.amount || 0), 0),
+    [rewardSummary.allRewards]
   );
 
   return (
@@ -1371,7 +1441,7 @@ export function CompletedTasksView({
           onClick={() => onNavigate('proof')}
           className="min-h-[44px] px-4 rounded-xl bg-white/8 hover:bg-white/12 border border-white/12 text-xs sm:text-sm font-medium text-white transition-colors whitespace-nowrap shrink-0"
         >
-          View All Proof Submissions
+          View Active Proof Queue
         </button>
       </div>
 
@@ -1380,7 +1450,7 @@ export function CompletedTasksView({
         <div className="rounded-2xl bg-[#0D1730]/95 border border-emerald-400/25 p-4 sm:p-5">
           <p className="text-xs text-sky-200/75">Completed Tasks</p>
           <p className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-white">
-            {approvedSubmissions.length}
+            {rewardSummary.allRewards.length}
           </p>
         </div>
         <div className="rounded-2xl bg-[#0D1730]/95 border border-blue-400/25 p-4 sm:p-5">
@@ -1391,11 +1461,11 @@ export function CompletedTasksView({
         </div>
       </div>
 
-      {approvedSubmissions.length === 0 ? (
+      {rewardSummary.allRewards.length === 0 ? (
         <div className="rounded-2xl bg-[#0D1730]/90 border border-white/10 p-10 text-center space-y-3">
           <p className="text-base font-semibold text-white">No completed tasks yet</p>
           <p className="text-xs sm:text-sm text-sky-200/65 max-w-md mx-auto">
-            Only Admin-approved proof submissions count as completed tasks and credit BDT rewards.
+            Only Admin-approved tasks count as completed and credit BDT rewards to your wallet.
           </p>
           <button
             type="button"
@@ -1408,51 +1478,40 @@ export function CompletedTasksView({
         </div>
       ) : (
         <div className="rounded-2xl bg-[#0D1730]/95 border border-white/10 divide-y divide-white/8 overflow-hidden">
-          {approvedSubmissions.map((item) => (
-            <div
-              key={item.submissionId}
-              className="p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
-            >
-              <div className="flex items-start gap-4 min-w-0">
-                <ProofScreenshotViewer
-                  assetId={item.screenshotAssetId}
-                  title={`${item.taskCode} · ${item.taskTitle}`}
-                  compact
-                />
+          {rewardSummary.allRewards.map((tx) => {
+            const isCustom = tx.type === 'custom_task_reward';
+            const codeMatch = tx.description?.match(/(?:TSK|CTK)-\d{4,6}/)?.[0];
+            const displayCode = tx.taskCode || codeMatch || (isCustom ? 'CUSTOM' : 'OFFICIAL');
+            return (
+              <div
+                key={tx.transactionId}
+                className="p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+              >
                 <div className="min-w-0 space-y-1">
                   <p className="text-xs font-mono tabular-nums text-sky-200/70">
-                    {item.taskCode}
+                    <span className="text-teal-300 font-semibold">{displayCode}</span>
                     <span aria-hidden="true"> · </span>
-                    <span>Approved {formatDateTime(item.reviewedAt || item.updatedAt)}</span>
+                    <span>{isCustom ? 'Custom Task' : 'Official Task'}</span>
+                    <span aria-hidden="true"> · </span>
+                    <span>Approved {formatDateTime(tx.approvedAt || tx.createdAt)}</span>
                   </p>
                   <h2 className="text-sm sm:text-base font-semibold text-white truncate">
-                    {item.taskTitle}
+                    {tx.taskName || tx.description}
                   </h2>
-                  {item.proofLink && (
-                    <a
-                      href={item.proofLink}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-xs text-teal-300 hover:underline max-w-full"
-                    >
-                      <span className="truncate max-w-[240px] sm:max-w-xs">{item.proofLink}</span>
-                      <ExternalLink className="w-3 h-3 shrink-0" />
-                    </a>
-                  )}
                   <p className="inline-flex items-center gap-1.5 text-xs text-emerald-400 font-medium">
                     <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                    <span>Completed · Reward Credited</span>
+                    <span>Completed · Reward Credited to Wallet</span>
+                  </p>
+                </div>
+
+                <div className="sm:text-right shrink-0">
+                  <p className="text-lg font-bold font-mono tabular-nums text-teal-300">
+                    +{formatBdt(tx.amount)}
                   </p>
                 </div>
               </div>
-
-              <div className="sm:text-right shrink-0">
-                <p className="text-lg font-bold font-mono tabular-nums text-teal-300">
-                  +{formatBdt(item.rewardAmount)}
-                </p>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
@@ -1460,30 +1519,42 @@ export function CompletedTasksView({
 }
 
 // ============================================================================
-// 4. Proof Submission History (Pending Review, Approved, Rejected Filters)
+// 4. Proof Submission History (Pending Review & Rejected Active Queue)
 // ============================================================================
 export function ProofSubmissionsView({
   submissions,
+  transactions,
   onNavigate,
 }: {
   submissions: TaskSubmission[];
+  transactions: WalletTransaction[];
   onNavigate: (tab: MemberPageTab) => void;
 }) {
-  const [filter, setFilter] = useState<'all' | 'pending' | 'approved' | 'rejected'>('all');
+  const [filter, setFilter] = useState<'all' | 'pending' | 'rejected'>('all');
+
+  const rewardSummary = useMemo(
+    () => getUnreversedRewardTransactions(transactions),
+    [transactions]
+  );
+
+  const activeSubmissions = useMemo(
+    () => submissions.filter((s) => s.status !== 'approved'),
+    [submissions]
+  );
 
   const counts = useMemo(() => {
     return {
-      all: submissions.length,
-      pending: submissions.filter((s) => s.status === 'pending').length,
-      approved: submissions.filter((s) => s.status === 'approved').length,
-      rejected: submissions.filter((s) => s.status === 'rejected').length,
+      all: activeSubmissions.length,
+      pending: activeSubmissions.filter((s) => s.status === 'pending').length,
+      rejected: activeSubmissions.filter((s) => s.status === 'rejected').length,
+      completed: rewardSummary.allRewards.length,
     };
-  }, [submissions]);
+  }, [activeSubmissions, rewardSummary.allRewards.length]);
 
   const filtered = useMemo(() => {
-    if (filter === 'all') return submissions;
-    return submissions.filter((s) => s.status === filter);
-  }, [submissions, filter]);
+    if (filter === 'all') return activeSubmissions;
+    return activeSubmissions.filter((s) => s.status === filter);
+  }, [activeSubmissions, filter]);
 
   return (
     <div className="space-y-6">
@@ -1491,7 +1562,8 @@ export function ProofSubmissionsView({
         <div>
           <h1 className="text-xl sm:text-2xl font-bold text-white">Proof Submissions</h1>
           <p className="text-xs sm:text-sm text-sky-200/70 mt-0.5">
-            Track Pending Review, Approved, and Rejected task proof screenshots.
+            Track Pending Review and Rejected proofs. Approved proofs are automatically cleared once
+            credited to your wallet.
           </p>
         </div>
         <button
@@ -1499,7 +1571,7 @@ export function ProofSubmissionsView({
           onClick={() => onNavigate('completed')}
           className="min-h-[44px] px-4 rounded-xl bg-white/8 hover:bg-white/12 border border-white/12 text-xs sm:text-sm font-medium text-white transition-colors whitespace-nowrap shrink-0"
         >
-          Completed Tasks ({counts.approved})
+          Completed Tasks ({counts.completed})
         </button>
       </div>
 
@@ -1507,9 +1579,8 @@ export function ProofSubmissionsView({
       <div className="flex items-center gap-1 p-1 rounded-xl bg-[#081022] border border-white/10 overflow-x-auto">
         {(
           [
-            { id: 'all', label: `All (${counts.all})` },
+            { id: 'all', label: `All Active (${counts.all})` },
             { id: 'pending', label: `Pending Review (${counts.pending})` },
-            { id: 'approved', label: `Approved (${counts.approved})` },
             { id: 'rejected', label: `Rejected (${counts.rejected})` },
           ] as const
         ).map((tab) => (
@@ -1530,9 +1601,9 @@ export function ProofSubmissionsView({
 
       {filtered.length === 0 ? (
         <div className="rounded-2xl bg-[#0D1730]/90 border border-white/10 p-10 text-center space-y-2">
-          <p className="text-base font-semibold text-white">No submissions in this filter</p>
+          <p className="text-base font-semibold text-white">No active proof submissions here</p>
           <p className="text-xs sm:text-sm text-sky-200/65">
-            Complete an open task and upload screenshot proof to track review status here.
+            Approved tasks are credited directly to your Wallet and listed under Completed Tasks.
           </p>
         </div>
       ) : (
@@ -1569,12 +1640,6 @@ export function ProofSubmissionsView({
                     <p className="text-xs text-sky-200/75">Note: {sub.submissionNote}</p>
                   )}
 
-                  {sub.status === 'approved' && (
-                    <p className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-400">
-                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                      <span>Approved · Credited {formatBdt(sub.rewardAmount)}</span>
-                    </p>
-                  )}
                   {sub.status === 'pending' && (
                     <p className="inline-flex items-center gap-1.5 text-xs font-medium text-purple-300">
                       <Clock className="w-3.5 h-3.5 shrink-0" />
@@ -2207,13 +2272,14 @@ export function MemberWithdrawView({
 export function MemberProfileView({
   profile,
   wallet,
-  submissions,
+  transactions,
   passwordRequests,
   onLogout,
 }: {
   profile: UserProfile;
   wallet: MemberWallet | null;
-  submissions: TaskSubmission[];
+  submissions?: TaskSubmission[];
+  transactions: WalletTransaction[];
   passwordRequests: PasswordChangeRequest[];
   onLogout: () => Promise<void>;
 }) {
@@ -2234,10 +2300,10 @@ export function MemberProfileView({
 
   const avatarInputRef = useRef<HTMLInputElement>(null);
 
-  const approvedTasksCount = useMemo(
-    () => submissions.filter((s) => s.status === 'approved').length,
-    [submissions]
-  );
+  const approvedTasksCount = useMemo(() => {
+    const rewardSummary = getUnreversedRewardTransactions(transactions);
+    return Math.max(Number(profile.completedTasksCount || 0), rewardSummary.allRewards.length);
+  }, [profile.completedTasksCount, transactions]);
 
   const activeApprovedRequest = useMemo(
     () => passwordRequests.find((r) => r.status === 'approved'),

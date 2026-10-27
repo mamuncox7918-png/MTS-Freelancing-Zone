@@ -55,6 +55,21 @@ service cloud.firestore {
         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status == 'approved';
     }
 
+    // Enforces that an Assistant Admin official task approval atomically credits the wallet/ledger
+    // AND deletes the approved submission document in the exact same writeBatch.
+    function isAtomicAssistantOfficialApproval(subId, memberUid) {
+      return isValidId(subId) &&
+        exists(/databases/$(database)/documents/submissions/$(subId)) &&
+        get(/databases/$(database)/documents/submissions/$(subId)).data.userId == memberUid &&
+        get(/databases/$(database)/documents/submissions/$(subId)).data.status == 'pending' &&
+        !exists(/databases/$(database)/documents/transactions/$('tx_reward_' + subId)) &&
+        !existsAfter(/databases/$(database)/documents/submissions/$(subId)) &&
+        existsAfter(/databases/$(database)/documents/transactions/$('tx_reward_' + subId)) &&
+        getAfter(/databases/$(database)/documents/transactions/$('tx_reward_' + subId)).data.userId == memberUid &&
+        getAfter(/databases/$(database)/documents/transactions/$('tx_reward_' + subId)).data.type == 'task_reward' &&
+        getAfter(/databases/$(database)/documents/transactions/$('tx_reward_' + subId)).data.amount == get(/databases/$(database)/documents/submissions/$(subId)).data.rewardAmount;
+    }
+
     // =========================================================================
     // Validation Blueprints (Synchronized with firebase-blueprint.json)
     // =========================================================================
@@ -289,7 +304,7 @@ service cloud.firestore {
         data.keys().hasOnly([
           'transactionId', 'userId', 'memberId', 'type', 'amount',
           'feeAmount', 'netAmount', 'direction', 'description', 'referenceId',
-          'taskName', 'submissionId', 'approvedAt', 'createdAt'
+          'taskId', 'taskCode', 'taskName', 'submissionId', 'approvedAt', 'createdAt'
         ]) &&
         isValidId(data.transactionId) &&
         isValidId(data.userId) &&
@@ -304,6 +319,12 @@ service cloud.firestore {
         data.direction is string && data.direction.size() <= 15 && data.direction in ['credit', 'debit', 'settlement'] &&
         data.description is string && data.description.size() >= 3 && data.description.size() <= 1000 &&
         isValidId(data.referenceId) &&
+        (!('taskId' in data) || (
+          data.taskId is string &&
+          data.taskId.size() <= 128 &&
+          (data.taskId == '' || isValidId(data.taskId))
+        )) &&
+        (!('taskCode' in data) || (data.taskCode is string && data.taskCode.size() <= 20)) &&
         (!('taskName' in data) || (data.taskName is string && data.taskName.size() <= 400)) &&
         (!('submissionId' in data) || (
           data.submissionId is string &&
@@ -622,10 +643,12 @@ service cloud.firestore {
               ) || (
                 incoming().completedTasksCount == existing().completedTasksCount + 1 &&
                 incoming().pendingSubmissionsCount == (existing().pendingSubmissionsCount > 0 ? existing().pendingSubmissionsCount - 1 : 0) &&
+                existsAfter(/databases/$(database)/documents/wallets/$(userId)) &&
                 ('lastCreditedSubmissionId' in getAfter(/databases/$(database)/documents/wallets/$(userId)).data) &&
-                isValidId(getAfter(/databases/$(database)/documents/wallets/$(userId)).data.lastCreditedSubmissionId) &&
-                get(/databases/$(database)/documents/submissions/$(getAfter(/databases/$(database)/documents/wallets/$(userId)).data.lastCreditedSubmissionId)).data.status == 'pending' &&
-                getAfter(/databases/$(database)/documents/submissions/$(getAfter(/databases/$(database)/documents/wallets/$(userId)).data.lastCreditedSubmissionId)).data.status == 'approved' &&
+                isAtomicAssistantOfficialApproval(
+                  getAfter(/databases/$(database)/documents/wallets/$(userId)).data.lastCreditedSubmissionId,
+                  userId
+                ) &&
                 incoming().totalEarnings == existing().totalEarnings + get(/databases/$(database)/documents/submissions/$(getAfter(/databases/$(database)/documents/wallets/$(userId)).data.lastCreditedSubmissionId)).data.rewardAmount
               )
             )
@@ -679,9 +702,24 @@ service cloud.firestore {
         incoming().createdAt == request.time &&
         exists(/databases/$(database)/documents/users/$(request.auth.uid));
       allow update: if false;
-      allow delete: if isSignedIn() && isValidId(assetId) &&
-        resource.data.ownerId == request.auth.uid &&
-        resource.data.purpose == 'avatar';
+      allow delete: if isSignedIn() && isValidId(assetId) && (
+        isAdmin() ||
+        (resource != null && resource.data.ownerId == request.auth.uid && resource.data.purpose == 'avatar') ||
+        (
+          isAssistantAdmin() && (
+            resource == null || (
+              resource.data.purpose == 'proof' &&
+              existsAfter(/databases/$(database)/documents/wallets/$(resource.data.ownerId)) &&
+              ('lastCreditedSubmissionId' in getAfter(/databases/$(database)/documents/wallets/$(resource.data.ownerId)).data) &&
+              isAtomicAssistantOfficialApproval(
+                getAfter(/databases/$(database)/documents/wallets/$(resource.data.ownerId)).data.lastCreditedSubmissionId,
+                resource.data.ownerId
+              ) &&
+              get(/databases/$(database)/documents/submissions/$(getAfter(/databases/$(database)/documents/wallets/$(resource.data.ownerId)).data.lastCreditedSubmissionId)).data.screenshotAssetId == assetId
+            )
+          )
+        )
+      );
     }
 
     match /tasks/{taskId} {
@@ -740,17 +778,22 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
         existing().status == 'pending' &&
-        (
-          (incoming().status == 'approved' && incoming().rejectionReason == '') ||
-          (incoming().status == 'rejected' && incoming().rejectionReason.size() >= 3)
-        ) &&
+        incoming().status == 'rejected' &&
+        incoming().rejectionReason.size() >= 3 &&
         incoming().reviewedBy == request.auth.uid &&
         incoming().diff(existing()).affectedKeys().hasOnly([
           'status', 'rejectionReason', 'reviewedBy', 'reviewerId', 'reviewerName',
           'reviewerRole', 'reviewAction', 'reviewedAt', 'updatedAt'
         ]) &&
         (isAdmin() || isAssistantAdmin());
-      allow delete: if false;
+      allow delete: if isSignedIn() && isValidId(submissionId) && (
+        isAdmin() ||
+        (
+          isAssistantAdmin() &&
+          resource != null &&
+          isAtomicAssistantOfficialApproval(submissionId, resource.data.userId)
+        )
+      );
     }
 
     match /customTasks/{customTaskId} {
@@ -812,31 +855,22 @@ service cloud.firestore {
               'assistantReviewerId', 'assistantReviewerName', 'assistantReviewedAt', 'updatedAt'
             ])
           ) ||
-          // Action 2: ONLY Main Admin finally approves or rejects custom task payment
+          // Action 2: ONLY Main Admin rejects custom task (approvals atomically credit wallet & delete customTask)
           (
             isAdmin() &&
             existing().status == 'pending' &&
             incoming().reviewedBy == request.auth.uid &&
-            (
-              (
-                incoming().status == 'approved' &&
-                incoming().approvedAmount >= 1 &&
-                incoming().rejectionReason == '' &&
-                incoming().transactionId == 'tx_custom_' + customTaskId
-              ) || (
-                incoming().status == 'rejected' &&
-                incoming().approvedAmount == 0 &&
-                incoming().rejectionReason.size() >= 3 &&
-                incoming().transactionId == ''
-              )
-            ) &&
+            incoming().status == 'rejected' &&
+            incoming().approvedAmount == 0 &&
+            incoming().rejectionReason.size() >= 3 &&
+            incoming().transactionId == '' &&
             incoming().diff(existing()).affectedKeys().hasOnly([
               'status', 'approvedAmount', 'rejectionReason', 'reviewedBy',
               'reviewerId', 'reviewerName', 'reviewedAt', 'transactionId', 'updatedAt'
             ])
           )
         );
-      allow delete: if false;
+      allow delete: if isVerifiedAdminAuth() && isValidId(customTaskId) && isAdmin();
     }
 
     match /notifications/{notificationId} {
@@ -882,12 +916,8 @@ service cloud.firestore {
           (
             isAssistantAdmin() &&
             ('lastCreditedSubmissionId' in incoming()) &&
-            isValidId(incoming().lastCreditedSubmissionId) &&
             incoming().totalWithdrawals == 0 &&
-            exists(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)) &&
-            get(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.userId == userId &&
-            get(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.status == 'pending' &&
-            getAfter(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.status == 'approved' &&
+            isAtomicAssistantOfficialApproval(incoming().lastCreditedSubmissionId, userId) &&
             incoming().availableBalance == get(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.rewardAmount &&
             incoming().totalEarnings == get(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.rewardAmount
           ) ||
@@ -919,15 +949,10 @@ service cloud.firestore {
           (
             isAssistantAdmin() &&
             ('lastCreditedSubmissionId' in incoming()) &&
-            isValidId(incoming().lastCreditedSubmissionId) &&
             incoming().diff(existing()).affectedKeys().hasOnly([
               'availableBalance', 'totalEarnings', 'lastCreditedSubmissionId', 'updatedAt'
             ]) &&
-            exists(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)) &&
-            get(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.userId == userId &&
-            get(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.status == 'pending' &&
-            getAfter(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.status == 'approved' &&
-            getAfter(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.reviewedBy == request.auth.uid &&
+            isAtomicAssistantOfficialApproval(incoming().lastCreditedSubmissionId, userId) &&
             incoming().availableBalance == existing().availableBalance + get(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.rewardAmount &&
             incoming().totalEarnings == existing().totalEarnings + get(/databases/$(database)/documents/submissions/$(incoming().lastCreditedSubmissionId)).data.rewardAmount
           ) ||
@@ -966,11 +991,9 @@ service cloud.firestore {
             incoming().feeAmount == 0 &&
             incoming().netAmount == incoming().amount &&
             transactionId == 'tx_reward_' + incoming().referenceId &&
-            exists(/databases/$(database)/documents/submissions/$(incoming().referenceId)) &&
-            get(/databases/$(database)/documents/submissions/$(incoming().referenceId)).data.status == 'pending' &&
-            getAfter(/databases/$(database)/documents/submissions/$(incoming().referenceId)).data.status == 'approved' &&
-            incoming().userId == get(/databases/$(database)/documents/submissions/$(incoming().referenceId)).data.userId &&
-            incoming().amount == get(/databases/$(database)/documents/submissions/$(incoming().referenceId)).data.rewardAmount
+            isAtomicAssistantOfficialApproval(incoming().referenceId, incoming().userId) &&
+            existsAfter(/databases/$(database)/documents/wallets/$(incoming().userId)) &&
+            getAfter(/databases/$(database)/documents/wallets/$(incoming().userId)).data.lastCreditedSubmissionId == incoming().referenceId
           ) ||
           (
             incoming().userId == request.auth.uid &&
@@ -1090,11 +1113,7 @@ service cloud.firestore {
             isValidId(incoming().lastSubmissionId) &&
             incoming().lastTransactionId == 'tx_reward_' + incoming().lastSubmissionId &&
             incoming().approvedTaskCount == 1 &&
-            exists(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)) &&
-            get(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.userId == incoming().userId &&
-            get(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.status == 'pending' &&
-            getAfter(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.status == 'approved' &&
-            getAfter(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.reviewedBy == request.auth.uid &&
+            isAtomicAssistantOfficialApproval(incoming().lastSubmissionId, incoming().userId) &&
             incoming().eligibleEarnings == get(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.rewardAmount
           )
         );
@@ -1113,11 +1132,7 @@ service cloud.firestore {
             incoming().lastTransactionId == 'tx_reward_' + incoming().lastSubmissionId &&
             incoming().approvedTaskCount == existing().approvedTaskCount + 1 &&
             incoming().reachedAtMs >= existing().reachedAtMs &&
-            exists(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)) &&
-            get(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.userId == existing().userId &&
-            get(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.status == 'pending' &&
-            getAfter(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.status == 'approved' &&
-            getAfter(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.reviewedBy == request.auth.uid &&
+            isAtomicAssistantOfficialApproval(incoming().lastSubmissionId, existing().userId) &&
             incoming().eligibleEarnings == existing().eligibleEarnings + get(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.rewardAmount
           ) ||
           (

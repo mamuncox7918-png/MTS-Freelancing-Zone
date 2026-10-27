@@ -834,6 +834,16 @@
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
+        "taskId": {
+          "type": "string",
+          "description": "Associated official taskId recorded on task_reward entries so duplicate submissions remain blocked after approved submission cleanup.",
+          "maxLength": 128
+        },
+        "taskCode": {
+          "type": "string",
+          "description": "Human-readable official or custom task code (e.g., TSK-10001 or CTK-10001) recorded on reward credits.",
+          "maxLength": 20
+        },
         "taskName": {
           "type": "string",
           "description": "Task name recorded on task_reward and custom_task_reward entries.",

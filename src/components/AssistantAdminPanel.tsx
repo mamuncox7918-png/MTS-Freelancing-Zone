@@ -66,7 +66,7 @@ export function AssistantAdminPanel({
   const [busyAction, setBusyAction] = useState<string | null>(null);
 
   // Official Proof Submissions review state
-  const [subFilter, setSubFilter] = useState<'pending' | 'approved' | 'rejected'>('pending');
+  const [subFilter, setSubFilter] = useState<'pending' | 'rejected'>('pending');
   const [subSearch, setSubSearch] = useState('');
   const [rejectingSubId, setRejectingSubId] = useState<string | null>(null);
   const [subRejectReason, setSubRejectReason] = useState('');
@@ -75,12 +75,24 @@ export function AssistantAdminPanel({
   );
 
   // Custom Task inspection state
-  const [ctFilter, setCtFilter] = useState<'pending' | 'approved' | 'rejected'>('pending');
+  const [ctFilter, setCtFilter] = useState<'pending' | 'rejected'>('pending');
   const [ctSearch, setCtSearch] = useState('');
   const [ctNotes, setCtNotes] = useState<Record<string, string>>({});
 
-  // Completed Official Tasks search
+  // Completed Official Tasks search & lightweight session log (approved proofs auto-delete from DB)
   const [completedSearch, setCompletedSearch] = useState('');
+  const [sessionApproved, setSessionApproved] = useState<
+    Array<{
+      submissionId: string;
+      taskCode: string;
+      taskTitle: string;
+      memberId: string;
+      memberName: string;
+      rewardAmount: number;
+      reviewedAt: string;
+      reviewerId: string;
+    }>
+  >([]);
 
   useEffect(() => {
     if (currentAssistant.role !== 'assistant_admin' || currentAssistant.status !== 'approved') {
@@ -134,11 +146,12 @@ export function AssistantAdminPanel({
 
   const stats = useMemo(() => {
     const pendingProofs = submissions.filter((s) => s.status === 'pending').length;
-    const approvedProofs = submissions.filter((s) => s.status === 'approved').length;
+    const legacyApprovedProofs = submissions.filter((s) => s.status === 'approved').length;
+    const approvedProofs = legacyApprovedProofs + sessionApproved.length;
     const rejectedProofs = submissions.filter((s) => s.status === 'rejected').length;
-    const myReviewedCount = submissions.filter(
-      (s) => s.reviewedBy === currentAssistant.uid
-    ).length;
+    const myReviewedCount =
+      submissions.filter((s) => s.reviewedBy === currentAssistant.uid).length +
+      sessionApproved.length;
     const pendingCustomTasks = customTasks.filter((c) => c.status === 'pending').length;
     const uninspectedCustomTasks = customTasks.filter(
       (c) => c.status === 'pending' && c.assistantStatus === 'unreviewed'
@@ -154,7 +167,7 @@ export function AssistantAdminPanel({
       uninspectedCustomTasks,
       activeTasks,
     };
-  }, [submissions, customTasks, tasks, currentAssistant.uid]);
+  }, [submissions, customTasks, tasks, currentAssistant.uid, sessionApproved.length]);
 
   const filteredSubmissions = useMemo(() => {
     const q = subSearch.trim().toLowerCase();
@@ -187,8 +200,28 @@ export function AssistantAdminPanel({
 
   const completedOfficialTasks = useMemo(() => {
     const q = completedSearch.trim().toLowerCase();
-    return submissions
-      .filter((s) => s.status === 'approved')
+    const combined = [
+      ...sessionApproved,
+      ...submissions
+        .filter((s) => s.status === 'approved')
+        .map((s) => ({
+          submissionId: s.submissionId,
+          taskCode: s.taskCode,
+          taskTitle: s.taskTitle,
+          memberId: s.memberId,
+          memberName: s.memberName,
+          rewardAmount: s.rewardAmount,
+          reviewedAt: s.reviewedAt || s.updatedAt,
+          reviewerId: s.reviewerId || '',
+        })),
+    ];
+    const seen = new Set<string>();
+    return combined
+      .filter((item) => {
+        if (seen.has(item.submissionId)) return false;
+        seen.add(item.submissionId);
+        return true;
+      })
       .filter(
         (s) =>
           !q ||
@@ -197,7 +230,7 @@ export function AssistantAdminPanel({
           s.memberId.toLowerCase().includes(q) ||
           s.memberName.toLowerCase().includes(q)
       );
-  }, [submissions, completedSearch]);
+  }, [submissions, sessionApproved, completedSearch]);
 
   const handleReviewOfficialSubmission = async (
     submissionId: string,
@@ -214,6 +247,8 @@ export function AssistantAdminPanel({
       return;
     }
 
+    const targetSub = submissions.find((s) => s.submissionId === submissionId);
+
     setBusyId(submissionId);
     setBusyAction(decision);
     try {
@@ -224,13 +259,28 @@ export function AssistantAdminPanel({
           rejectionReason: decision === 'rejected' ? trimmedReason : '',
         },
       });
+      if (decision === 'approved' && targetSub) {
+        setSessionApproved((prev) => [
+          {
+            submissionId: targetSub.submissionId,
+            taskCode: targetSub.taskCode,
+            taskTitle: targetSub.taskTitle,
+            memberId: targetSub.memberId,
+            memberName: targetSub.memberName,
+            rewardAmount: targetSub.rewardAmount,
+            reviewedAt: new Date().toISOString(),
+            reviewerId: currentAssistant.memberId,
+          },
+          ...prev,
+        ]);
+      }
       setRejectingSubId(null);
       setSubRejectReason('');
       setBanner({
         type: 'success',
         text:
           decision === 'approved'
-            ? 'Official task approved and predefined reward credited to member wallet.'
+            ? 'Official task approved, reward credited to wallet, and proof cleaned up automatically.'
             : 'Official task submission rejected with reason recorded.',
       });
     } catch (err) {
@@ -507,7 +557,7 @@ export function AssistantAdminPanel({
         <div className="space-y-4">
           <div className="flex flex-col sm:flex-row gap-3 justify-between">
             <div className="flex items-center gap-1 p-1 rounded-xl bg-[#081022] border border-white/10 w-fit overflow-x-auto">
-              {(['pending', 'approved', 'rejected'] as const).map((st) => (
+              {(['pending', 'rejected'] as const).map((st) => (
                 <button
                   key={st}
                   type="button"
@@ -518,7 +568,7 @@ export function AssistantAdminPanel({
                       : 'text-sky-200/75 hover:text-white'
                   }`}
                 >
-                  {st === 'pending' ? 'Pending Review' : st}
+                  {st === 'pending' ? `Pending Review (${stats.pendingProofs})` : 'Rejected'}
                 </button>
               ))}
             </div>
@@ -534,6 +584,10 @@ export function AssistantAdminPanel({
               />
             </div>
           </div>
+
+          <p className="text-xs text-sky-200/65">
+            Approved official task proofs and screenshots are automatically deleted after crediting the member&apos;s wallet to conserve database quota.
+          </p>
 
           {filteredSubmissions.length === 0 ? (
             <div className="rounded-2xl bg-[#0D1730]/90 border border-white/10 p-10 text-center text-sm text-sky-200/70">
@@ -800,7 +854,7 @@ export function AssistantAdminPanel({
 
           <div className="flex flex-col sm:flex-row gap-3 justify-between">
             <div className="flex items-center gap-1 p-1 rounded-xl bg-[#081022] border border-white/10 w-fit overflow-x-auto">
-              {(['pending', 'approved', 'rejected'] as const).map((st) => (
+              {(['pending', 'rejected'] as const).map((st) => (
                 <button
                   key={st}
                   type="button"
@@ -811,7 +865,9 @@ export function AssistantAdminPanel({
                       : 'text-sky-200/75 hover:text-white'
                   }`}
                 >
-                  {st === 'pending' ? 'Pending Main Admin' : st}
+                  {st === 'pending'
+                    ? `Pending Main Admin (${stats.pendingCustomTasks})`
+                    : 'Rejected'}
                 </button>
               ))}
             </div>
@@ -1016,10 +1072,14 @@ export function AssistantAdminPanel({
             />
           </div>
 
+          <p className="text-xs text-sky-200/65">
+            Approved submissions and proof screenshots are automatically cleared from storage right after wallet credit. Approvals performed in your current session appear below.
+          </p>
+
           <div className="rounded-2xl bg-[#0D1730]/95 border border-white/10 divide-y divide-white/8 overflow-hidden">
             {completedOfficialTasks.length === 0 ? (
               <div className="p-10 text-center text-sm text-sky-200/70">
-                No approved official task completions recorded yet.
+                No session-approved official task completions listed right now.
               </div>
             ) : (
               completedOfficialTasks.map((rec) => (
@@ -1038,7 +1098,7 @@ export function AssistantAdminPanel({
                       <span className="text-teal-300 font-semibold">
                         {rec.memberId} · {rec.memberName}
                       </span>{' '}
-                      · Approved {formatDateTime(rec.reviewedAt || rec.updatedAt)}
+                      · Approved {formatDateTime(rec.reviewedAt)}
                       {rec.reviewerId ? ` · By ${rec.reviewerId}` : ''}
                     </p>
                   </div>

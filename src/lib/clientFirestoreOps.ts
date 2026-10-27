@@ -29,6 +29,7 @@ import {
   createEmptyRewardConfigs,
   extractTimestampMs,
   getDhakaMonthKey,
+  getUnreversedRewardTransactions,
   isValidMonthKey,
   normalizeRewardConfigs,
 } from './leaderboard';
@@ -299,10 +300,11 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
     }
 
     try {
-      const [userSnap, taskSnap, existingSubsSnap] = await Promise.all([
+      const [userSnap, taskSnap, existingSubsSnap, existingTxsSnap] = await Promise.all([
         getDoc(doc(db, 'users', uid)),
         getDoc(doc(db, 'tasks', taskId)),
         getDocs(query(collection(db, 'submissions'), where('userId', '==', uid))),
+        getDocs(query(collection(db, 'transactions'), where('userId', '==', uid))),
       ]);
 
       if (!userSnap.exists() || userSnap.data().status !== 'approved') {
@@ -311,6 +313,10 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
       if (!taskSnap.exists() || taskSnap.data().isActive !== true) {
         throw new Error('This task is no longer active.');
       }
+
+      const profileData = userSnap.data();
+      const taskData = taskSnap.data();
+      const taskCodeStr = String(taskData.taskCode || '');
 
       const duplicate = existingSubsSnap.docs.find((d) => {
         const s = d.data();
@@ -324,8 +330,17 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
         );
       }
 
-      const profileData = userSnap.data();
-      const taskData = taskSnap.data();
+      const memberTxs = existingTxsSnap.docs.map(
+        (d) => ({ ...d.data(), transactionId: d.id } as WalletTransaction)
+      );
+      const rewardSummary = getUnreversedRewardTransactions(memberTxs);
+      if (
+        rewardSummary.completedTaskIds.has(taskId) ||
+        (taskCodeStr && rewardSummary.completedTaskCodes.has(taskCodeStr))
+      ) {
+        throw new Error('You have already completed and received the reward for this task.');
+      }
+
       const submissionId = randomDocId('sub');
       const batch = writeBatch(db);
 
@@ -716,8 +731,10 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
 
       const memberUid = String(subData.userId);
       const memberCode = String(subData.memberId || 'MTS-000000');
+      const taskId = String(subData.taskId || '').trim();
       const taskTitle = String(subData.taskTitle || 'Official Task').slice(0, 400);
-      const taskCode = String(subData.taskCode || 'TSK-00000');
+      const taskCode = String(subData.taskCode || 'TSK-00000').slice(0, 20);
+      const screenshotAssetId = String(subData.screenshotAssetId || '').trim();
       const rewardAmount = Number(subData.rewardAmount);
       const nowIso = new Date().toISOString();
       const nowMs = Date.parse(nowIso);
@@ -735,19 +752,13 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
       const notifId = randomDocId('ntf');
       const batch = writeBatch(db);
 
-      batch.update(doc(db, 'submissions', submissionId), {
-        status: decision,
-        rejectionReason,
-        reviewedBy: uid,
-        reviewerId,
-        reviewerName,
-        reviewerRole,
-        reviewAction: decision,
-        reviewedAt: nowIso,
-        updatedAt: serverTimestamp(),
-      });
-
       if (decision === 'approved') {
+        // Delete approved submission and its heavy proof screenshot immediately to conserve Firestore quota
+        batch.delete(doc(db, 'submissions', submissionId));
+        if (screenshotAssetId && VALID_ID_REGEX.test(screenshotAssetId)) {
+          batch.delete(doc(db, 'mediaAssets', screenshotAssetId));
+        }
+
         // Deterministic ledger ID prevents duplicate wallet credits for the same submission
         const txId = `tx_reward_${submissionId}`;
         if (walletSnap.exists()) {
@@ -833,6 +844,8 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
           direction: 'credit',
           description: `Task reward credited for ${taskCode} (${taskTitle.slice(0, 140)})`.slice(0, 240),
           referenceId: submissionId,
+          ...(taskId && VALID_ID_REGEX.test(taskId) ? { taskId } : {}),
+          taskCode,
           taskName: taskTitle,
           submissionId,
           approvedAt: nowIso,
@@ -859,13 +872,25 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
           action: 'SUBMISSION_APPROVED',
           targetType: 'submission',
           targetId: submissionId,
-          summary: `[${reviewerRole === 'admin' ? 'Main Admin' : 'Assistant Admin'} ${reviewerId}] Approved proof for ${taskCode} by ${memberCode} and credited ৳${rewardAmount}`.slice(
+          summary: `[${reviewerRole === 'admin' ? 'Main Admin' : 'Assistant Admin'} ${reviewerId}] Approved proof for ${taskCode} by ${memberCode}, credited ৳${rewardAmount}, and cleared proof storage`.slice(
             0,
             450
           ),
           createdAt: serverTimestamp(),
         });
       } else {
+        batch.update(doc(db, 'submissions', submissionId), {
+          status: 'rejected',
+          rejectionReason,
+          reviewedBy: uid,
+          reviewerId,
+          reviewerName,
+          reviewerRole,
+          reviewAction: 'rejected',
+          reviewedAt: nowIso,
+          updatedAt: serverTimestamp(),
+        });
+
         if (memberSnap.exists()) {
           const memberData = memberSnap.data();
           batch.update(doc(db, 'users', memberUid), {
@@ -905,7 +930,11 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
       await batch.commit();
       return { ok: true } as unknown as T;
     } catch (err) {
-      wrapPermError(err, OperationType.UPDATE, `submissions/${submissionId}`);
+      wrapPermError(
+        err,
+        decision === 'approved' ? OperationType.DELETE : OperationType.UPDATE,
+        `submissions/${submissionId}`
+      );
     }
   }
 
@@ -1457,7 +1486,8 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
       const memberUid = String(ctData.userId);
       const memberCode = String(ctData.memberId || 'MTS-000000');
       const taskName = String(ctData.taskName || 'Custom Task').slice(0, 400);
-      const customCode = String(ctData.customTaskCode || 'CTK-00000');
+      const customCode = String(ctData.customTaskCode || 'CTK-00000').slice(0, 20);
+      const screenshotAssetId = String(ctData.screenshotAssetId || '').trim();
       const requestedAmount = Number(ctData.requestedAmount);
 
       const finalApprovedAmount =
@@ -1495,19 +1525,13 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
       const logId = randomDocId('log');
       const batch = writeBatch(db);
 
-      batch.update(doc(db, 'customTasks', customTaskId), {
-        status: decision,
-        approvedAmount: finalApprovedAmount,
-        rejectionReason: decision === 'rejected' ? rawReason : '',
-        reviewedBy: uid,
-        reviewerId,
-        reviewerName,
-        reviewedAt: nowIso,
-        transactionId: txId,
-        updatedAt: serverTimestamp(),
-      });
-
       if (decision === 'approved') {
+        // Delete approved custom task and optional proof screenshot immediately to conserve Firestore quota
+        batch.delete(doc(db, 'customTasks', customTaskId));
+        if (screenshotAssetId && VALID_ID_REGEX.test(screenshotAssetId)) {
+          batch.delete(doc(db, 'mediaAssets', screenshotAssetId));
+        }
+
         if (walletSnap.exists()) {
           const walletData = walletSnap.data();
           batch.update(doc(db, 'wallets', memberUid), {
@@ -1590,6 +1614,7 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
           direction: 'credit',
           description: `Custom task payment credited for ${customCode} (${taskName.slice(0, 140)})`.slice(0, 240),
           referenceId: customTaskId,
+          taskCode: customCode,
           taskName,
           submissionId: customTaskId,
           approvedAt: nowIso,
@@ -1616,13 +1641,24 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
           action: 'CUSTOM_TASK_APPROVED',
           targetType: 'customTask',
           targetId: customTaskId,
-          summary: `Approved custom task ${customCode} ("${taskName}") for ${memberCode} and credited ৳${finalApprovedAmount}`.slice(
+          summary: `Approved custom task ${customCode} ("${taskName}") for ${memberCode}, credited ৳${finalApprovedAmount}, and cleared task storage`.slice(
             0,
             450
           ),
           createdAt: serverTimestamp(),
         });
       } else {
+        batch.update(doc(db, 'customTasks', customTaskId), {
+          status: 'rejected',
+          approvedAmount: 0,
+          rejectionReason: rawReason,
+          reviewedBy: uid,
+          reviewerId,
+          reviewerName,
+          reviewedAt: nowIso,
+          transactionId: '',
+          updatedAt: serverTimestamp(),
+        });
         batch.set(doc(db, 'notifications', notifId), {
           notificationId: notifId,
           userId: memberUid,
@@ -1655,7 +1691,11 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
       await batch.commit();
       return { ok: true } as unknown as T;
     } catch (err) {
-      wrapPermError(err, OperationType.UPDATE, `customTasks/${customTaskId}`);
+      wrapPermError(
+        err,
+        decision === 'approved' ? OperationType.DELETE : OperationType.UPDATE,
+        `customTasks/${customTaskId}`
+      );
     }
   }
 
@@ -2699,5 +2739,85 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
     }
   }
 
+  // 26. Main Admin: POST /api/admin/submissions/purge-approved
+  if (method === 'POST' && path === '/api/admin/submissions/purge-approved') {
+    if (!currentUser.emailVerified) {
+      throw new Error('Verified Main Admin authentication required.');
+    }
+    try {
+      const [adminSnap, callerSnap] = await Promise.all([
+        getDoc(doc(db, 'admins', uid)),
+        getDoc(doc(db, 'users', uid)),
+      ]);
+      const isMainAdmin =
+        isInitialAdmin ||
+        adminSnap.exists() ||
+        (callerSnap.exists() && callerSnap.data().role === 'admin');
+      if (!isMainAdmin) {
+        throw new Error('Only the Main Admin can purge legacy approved records.');
+      }
+
+      const [approvedSubsSnap, approvedCustomSnap] = await Promise.all([
+        getDocs(query(collection(db, 'submissions'), where('status', '==', 'approved'))),
+        getDocs(query(collection(db, 'customTasks'), where('status', '==', 'approved'))),
+      ]);
+
+      const ops: BatchOp[] = [];
+      const seenAssetIds = new Set<string>();
+      let deletedSubmissions = 0;
+      let deletedCustomTasks = 0;
+
+      for (const subDoc of approvedSubsSnap.docs) {
+        deletedSubmissions += 1;
+        ops.push((b) => b.delete(doc(db, 'submissions', subDoc.id)));
+        const assetId = String(subDoc.data().screenshotAssetId || '').trim();
+        if (assetId && VALID_ID_REGEX.test(assetId) && !seenAssetIds.has(assetId)) {
+          seenAssetIds.add(assetId);
+          ops.push((b) => b.delete(doc(db, 'mediaAssets', assetId)));
+        }
+      }
+
+      for (const ctDoc of approvedCustomSnap.docs) {
+        deletedCustomTasks += 1;
+        ops.push((b) => b.delete(doc(db, 'customTasks', ctDoc.id)));
+        const assetId = String(ctDoc.data().screenshotAssetId || '').trim();
+        if (assetId && VALID_ID_REGEX.test(assetId) && !seenAssetIds.has(assetId)) {
+          seenAssetIds.add(assetId);
+          ops.push((b) => b.delete(doc(db, 'mediaAssets', assetId)));
+        }
+      }
+
+      if (ops.length > 0) {
+        const logId = randomDocId('log');
+        ops.push((b) =>
+          b.set(doc(db, 'adminAuditLogs', logId), {
+            logId,
+            adminUid: uid,
+            adminEmail: email,
+            action: 'APPROVED_SUBMISSIONS_PURGED',
+            targetType: 'system',
+            targetId: 'approved_cleanup',
+            summary: `Purged ${deletedSubmissions} approved official submission(s), ${deletedCustomTasks} approved custom task(s), and ${seenAssetIds.size} proof screenshot(s) to conserve Firestore quota.`.slice(
+              0,
+              450
+            ),
+            createdAt: serverTimestamp(),
+          })
+        );
+        await commitBatchOpsInChunks(ops);
+      }
+
+      return {
+        ok: true,
+        deletedSubmissions,
+        deletedCustomTasks,
+        deletedMediaAssets: seenAssetIds.size,
+      } as unknown as T;
+    } catch (err) {
+      wrapPermError(err, OperationType.DELETE, 'submissions');
+    }
+  }
+
   throw new Error(`Unsupported operation (${method} ${path}).`);
 }
+

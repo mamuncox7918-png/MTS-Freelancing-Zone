@@ -8,6 +8,7 @@ import {
   Plus,
   Search,
   ShieldCheck,
+  Trash2,
   Trophy,
   UserCheck,
   UserPlus,
@@ -20,8 +21,10 @@ import {
   computeMonthlyLeaderboardFromTransactions,
   getDhakaMonthBounds,
   getDhakaMonthKey,
+  getUnreversedRewardTransactions,
 } from '../lib/leaderboard';
 import { AdminBest10Section } from './AdminBest10Section';
+import { AdminInspectedMemberModal } from './AdminInspectedMemberModal';
 import { AvatarDisplay, ProofScreenshotViewer } from './MediaView';
 import {
   AdminAuditLog,
@@ -87,6 +90,10 @@ export function AdminPanel({
   const [passwordRequests, setPasswordRequests] = useState<PasswordChangeRequest[]>([]);
   const [auditLogs, setAuditLogs] = useState<AdminAuditLog[]>([]);
   const [currentMonthEntries, setCurrentMonthEntries] = useState<MonthlyMemberEarning[]>([]);
+  const [usersLoaded, setUsersLoaded] = useState(false);
+  const [transactionsLoaded, setTransactionsLoaded] = useState(false);
+  const [monthEntriesLoaded, setMonthEntriesLoaded] = useState(false);
+  const [purgingApproved, setPurgingApproved] = useState(false);
   const initialLeaderboardSyncedRef = useRef<boolean>(false);
 
   const [banner, setBanner] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
@@ -120,12 +127,12 @@ export function AdminPanel({
   const [taskActive, setTaskActive] = useState(true);
 
   // Proof submission review state
-  const [subFilter, setSubFilter] = useState<'pending' | 'approved' | 'rejected'>('pending');
+  const [subFilter, setSubFilter] = useState<'pending' | 'rejected'>('pending');
   const [rejectingSubId, setRejectingSubId] = useState<string | null>(null);
   const [subRejectReason, setSubRejectReason] = useState('');
 
   // Custom task review & payment state
-  const [ctFilter, setCtFilter] = useState<'pending' | 'approved' | 'rejected'>('pending');
+  const [ctFilter, setCtFilter] = useState<'pending' | 'rejected'>('pending');
   const [ctSearch, setCtSearch] = useState('');
   const [ctApprovedAmounts, setCtApprovedAmounts] = useState<Record<string, string>>({});
   const [rejectingCtId, setRejectingCtId] = useState<string | null>(null);
@@ -157,6 +164,7 @@ export function AdminPanel({
           const list = snap.docs.map((d) => d.data() as UserProfile);
           list.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
           setUsers(list);
+          setUsersLoaded(true);
         },
         (err) => handleFirestoreError(err, OperationType.LIST, 'users')
       ),
@@ -200,6 +208,7 @@ export function AdminPanel({
           const list = snap.docs.map((d) => d.data() as WalletTransaction);
           list.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
           setTransactions(list);
+          setTransactionsLoaded(true);
         },
         (err) => handleFirestoreError(err, OperationType.LIST, 'transactions')
       ),
@@ -211,15 +220,6 @@ export function AdminPanel({
           setPasswordRequests(list);
         },
         (err) => handleFirestoreError(err, OperationType.LIST, 'passwordChangeRequests')
-      ),
-      onSnapshot(
-        collection(db, 'adminAuditLogs'),
-        (snap) => {
-          const list = snap.docs.map((d) => d.data() as AdminAuditLog);
-          list.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
-          setAuditLogs(list);
-        },
-        (err) => handleFirestoreError(err, OperationType.LIST, 'adminAuditLogs')
       ),
       onSnapshot(
         collection(db, 'customTasks'),
@@ -246,6 +246,7 @@ export function AdminPanel({
         ),
         (snap) => {
           setCurrentMonthEntries(snap.docs.map((d) => d.data() as MonthlyMemberEarning));
+          setMonthEntriesLoaded(true);
         },
         (err) => handleFirestoreError(err, OperationType.LIST, 'monthlyMemberEarnings')
       ),
@@ -253,6 +254,24 @@ export function AdminPanel({
 
     return () => unsubs.forEach((u) => u());
   }, [currentAdmin.role]);
+
+  // Lazy-load adminAuditLogs ONLY when viewing Audit Log or Best 10 tabs to conserve daily Firestore read quota
+  useEffect(() => {
+    if (currentAdmin.role !== 'admin') return;
+    if (activeTab !== 'audit' && activeTab !== 'best_10') return;
+
+    const unsub = onSnapshot(
+      collection(db, 'adminAuditLogs'),
+      (snap) => {
+        const list = snap.docs.map((d) => d.data() as AdminAuditLog);
+        list.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+        setAuditLogs(list);
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'adminAuditLogs')
+    );
+
+    return () => unsub();
+  }, [currentAdmin.role, activeTab]);
 
   const currentDhakaMonthKey = useMemo(() => getDhakaMonthKey(), []);
   const currentDhakaBounds = useMemo(
@@ -264,11 +283,13 @@ export function AdminPanel({
     [currentDhakaMonthKey, transactions, users]
   );
 
-  // One-time silent reconciliation for current Asia/Dhaka month if earlier tasks exist
+  // One-time silent reconciliation ONLY after users, transactions, and monthlyMemberEarnings have all loaded
   useEffect(() => {
     if (currentAdmin.role !== 'admin') return;
     if (initialLeaderboardSyncedRef.current) return;
-    if (users.length === 0) return;
+    if (!usersLoaded || !transactionsLoaded || !monthEntriesLoaded) return;
+
+    initialLeaderboardSyncedRef.current = true;
 
     const existingMap = new Map(currentMonthEntries.map((e) => [e.userId, e]));
     const needsSync =
@@ -283,14 +304,15 @@ export function AdminPanel({
       );
 
     if (!needsSync) return;
-    initialLeaderboardSyncedRef.current = true;
     apiRequest('/api/admin/leaderboard/recalculate', {
       method: 'POST',
       body: { monthKey: currentDhakaMonthKey, silentAutoSync: true },
     }).catch(() => undefined);
   }, [
     currentAdmin.role,
-    users.length,
+    usersLoaded,
+    transactionsLoaded,
+    monthEntriesLoaded,
     currentMonthEntries,
     currentMonthLeaderboard.allMemberStats,
     currentDhakaMonthKey,
@@ -314,6 +336,18 @@ export function AdminPanel({
     return set;
   }, [assistantRecords]);
 
+  const unreversedRewards = useMemo(
+    () => getUnreversedRewardTransactions(transactions),
+    [transactions]
+  );
+
+  const legacyApprovedCount = useMemo(
+    () =>
+      submissions.filter((s) => s.status === 'approved').length +
+      customTasks.filter((c) => c.status === 'approved').length,
+    [submissions, customTasks]
+  );
+
   const stats = useMemo(() => {
     const membersOnly = users.filter((u) => u.role === 'member');
     const assistantUsers = users.filter((u) => u.role === 'assistant_admin');
@@ -324,9 +358,11 @@ export function AdminPanel({
     const approvedMembers = membersOnly.filter((u) => u.status === 'approved').length;
     const activeTasks = tasks.filter((t) => t.isActive).length;
     const pendingProofs = submissions.filter((s) => s.status === 'pending').length;
-    const approvedProofs = submissions.filter((s) => s.status === 'approved').length;
+    const approvedProofs = unreversedRewards.rewards.filter((t) => t.type === 'task_reward').length;
     const pendingCustomTasks = customTasks.filter((c) => c.status === 'pending').length;
-    const approvedCustomTasks = customTasks.filter((c) => c.status === 'approved').length;
+    const approvedCustomTasks = unreversedRewards.rewards.filter(
+      (t) => t.type === 'custom_task_reward'
+    ).length;
     const pendingWithdrawals = withdrawals.filter((w) => w.status === 'pending');
     const paidWithdrawals = withdrawals.filter((w) => w.status === 'paid');
 
@@ -365,9 +401,36 @@ export function AdminPanel({
     tasks,
     submissions,
     customTasks,
+    unreversedRewards.rewards,
     withdrawals,
     passwordRequests,
   ]);
+
+  async function handlePurgeApproved() {
+    setPurgingApproved(true);
+    setBanner(null);
+    try {
+      const res = await apiRequest<{
+        deletedSubmissions: number;
+        deletedCustomTasks: number;
+        deletedScreenshots: number;
+      }>('/api/admin/submissions/purge-approved', {
+        method: 'POST',
+        body: {},
+      });
+      setBanner({
+        type: 'success',
+        text: `Cleaned up ${res.deletedSubmissions} old approved task(s), ${res.deletedCustomTasks} approved custom task(s), and ${res.deletedScreenshots} proof screenshot(s) from database storage.`,
+      });
+    } catch (err: any) {
+      setBanner({
+        type: 'error',
+        text: err?.message || 'Failed to clean up old approved submissions.',
+      });
+    } finally {
+      setPurgingApproved(false);
+    }
+  }
 
   useEffect(() => {
     if (!banner || banner.type !== 'success') return;
@@ -809,17 +872,32 @@ export function AdminPanel({
 
   const completedRecords = useMemo(() => {
     const q = completedSearch.trim().toLowerCase();
-    return submissions
-      .filter((s) => s.status === 'approved')
+    return unreversedRewards.rewards
+      .map((tx) => {
+        const member = userByUid.get(tx.userId);
+        const memberName = member?.fullName || tx.memberId;
+        const codeMatch = (tx.description || '').match(/\b((?:TSK|CTK)-\d{4,6})\b/);
+        const taskCode = tx.taskCode || (codeMatch ? codeMatch[1] : tx.type === 'custom_task_reward' ? 'CUSTOM' : 'TASK');
+        return {
+          transactionId: tx.transactionId,
+          userId: tx.userId,
+          memberId: tx.memberId,
+          memberName,
+          taskCode,
+          taskTitle: tx.description,
+          rewardAmount: tx.amount,
+          approvedAt: tx.createdAt,
+        };
+      })
       .filter(
-        (s) =>
+        (r) =>
           !q ||
-          s.taskCode.toLowerCase().includes(q) ||
-          s.taskTitle.toLowerCase().includes(q) ||
-          s.memberId.toLowerCase().includes(q) ||
-          s.memberName.toLowerCase().includes(q)
+          r.taskCode.toLowerCase().includes(q) ||
+          r.taskTitle.toLowerCase().includes(q) ||
+          r.memberId.toLowerCase().includes(q) ||
+          r.memberName.toLowerCase().includes(q)
       );
-  }, [submissions, completedSearch]);
+  }, [unreversedRewards.rewards, userByUid, completedSearch]);
 
   const filteredLedger = useMemo(() => {
     const q = ledgerSearch.trim().toLowerCase();
@@ -1389,22 +1467,42 @@ export function AdminPanel({
       {/* 4. PROOF SUBMISSIONS REVIEW */}
       {activeTab === 'submissions' && (
         <div className="space-y-4">
-          <div className="flex items-center gap-1 p-1 rounded-xl bg-[#081022] border border-white/10 w-fit">
-            {(['pending', 'approved', 'rejected'] as const).map((st) => (
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-1 p-1 rounded-xl bg-[#081022] border border-white/10 w-fit">
+              {(['pending', 'rejected'] as const).map((st) => (
+                <button
+                  key={st}
+                  type="button"
+                  onClick={() => setSubFilter(st)}
+                  className={`min-h-[38px] px-3.5 rounded-lg text-xs font-semibold capitalize whitespace-nowrap ${
+                    subFilter === st
+                      ? 'bg-teal-500 text-slate-950'
+                      : 'text-sky-200/75 hover:text-white'
+                  }`}
+                >
+                  {st === 'pending' ? `Pending Review (${stats.pendingProofs})` : 'Rejected'}
+                </button>
+              ))}
+            </div>
+
+            {legacyApprovedCount > 0 && (
               <button
-                key={st}
                 type="button"
-                onClick={() => setSubFilter(st)}
-                className={`min-h-[38px] px-3.5 rounded-lg text-xs font-semibold capitalize whitespace-nowrap ${
-                  subFilter === st
-                    ? 'bg-teal-500 text-slate-950'
-                    : 'text-sky-200/75 hover:text-white'
-                }`}
+                disabled={purgingApproved}
+                onClick={handlePurgeApproved}
+                className="min-h-[40px] px-3.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/30 text-amber-200 text-xs font-semibold inline-flex items-center gap-2 w-fit"
               >
-                {st === 'pending' ? 'Pending Review' : st}
+                <Trash2 className="w-3.5 h-3.5" />
+                {purgingApproved
+                  ? 'Cleaning Old Approved Proofs...'
+                  : `Delete Old Approved Proof(s) & Screenshots (${legacyApprovedCount})`}
               </button>
-            ))}
+            )}
           </div>
+
+          <p className="text-xs text-sky-200/65">
+            Approved task submissions and proof screenshots are automatically deleted right after crediting the member&apos;s wallet to save database quota.
+          </p>
 
           {submissions.filter((s) => s.status === subFilter).length === 0 ? (
             <div className="rounded-2xl bg-[#0D1730]/90 border border-white/10 p-10 text-center text-sm text-sky-200/70">
@@ -1618,25 +1716,39 @@ export function AdminPanel({
       {activeTab === 'custom_tasks' && (
         <div className="space-y-4">
           <div className="flex flex-col sm:flex-row gap-3 justify-between">
-            <div className="flex items-center gap-1 p-1 rounded-xl bg-[#081022] border border-white/10 w-fit overflow-x-auto">
-              {(['pending', 'approved', 'rejected'] as const).map((st) => (
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-1 p-1 rounded-xl bg-[#081022] border border-white/10 w-fit overflow-x-auto">
+                {(['pending', 'rejected'] as const).map((st) => (
+                  <button
+                    key={st}
+                    type="button"
+                    onClick={() => setCtFilter(st)}
+                    className={`min-h-[38px] px-3.5 rounded-lg text-xs font-semibold capitalize whitespace-nowrap ${
+                      ctFilter === st
+                        ? 'bg-teal-500 text-slate-950'
+                        : 'text-sky-200/75 hover:text-white'
+                    }`}
+                  >
+                    {st === 'pending'
+                      ? `Pending Payment (${stats.pendingCustomTasks})`
+                      : 'Rejected'}
+                  </button>
+                ))}
+              </div>
+
+              {legacyApprovedCount > 0 && (
                 <button
-                  key={st}
                   type="button"
-                  onClick={() => setCtFilter(st)}
-                  className={`min-h-[38px] px-3.5 rounded-lg text-xs font-semibold capitalize whitespace-nowrap ${
-                    ctFilter === st
-                      ? 'bg-teal-500 text-slate-950'
-                      : 'text-sky-200/75 hover:text-white'
-                  }`}
+                  disabled={purgingApproved}
+                  onClick={handlePurgeApproved}
+                  className="min-h-[38px] px-3 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/30 text-amber-200 text-xs font-semibold inline-flex items-center gap-1.5"
                 >
-                  {st === 'pending'
-                    ? `Pending Payment (${stats.pendingCustomTasks})`
-                    : st === 'approved'
-                    ? 'Approved & Paid'
-                    : 'Rejected'}
+                  <Trash2 className="w-3.5 h-3.5" />
+                  {purgingApproved
+                    ? 'Cleaning...'
+                    : `Delete Old Approved (${legacyApprovedCount})`}
                 </button>
-              ))}
+              )}
             </div>
 
             <div className="relative flex-1 sm:max-w-xs">
@@ -1650,6 +1762,10 @@ export function AdminPanel({
               />
             </div>
           </div>
+
+          <p className="text-xs text-sky-200/65">
+            Approved custom task requests and proof screenshots are automatically deleted right after crediting the member&apos;s wallet.
+          </p>
 
           {filteredCustomTasks.length === 0 ? (
             <div className="rounded-2xl bg-[#0D1730]/90 border border-white/10 p-10 text-center text-sm text-sky-200/70">
@@ -2156,7 +2272,7 @@ export function AdminPanel({
                 const recMember = userByUid.get(rec.userId);
                 return (
                 <div
-                  key={rec.submissionId}
+                  key={rec.transactionId}
                   className="px-5 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
                 >
                   <div className="flex items-start gap-3 min-w-0">
@@ -2181,20 +2297,8 @@ export function AdminPanel({
                         >
                           {rec.memberId} · {rec.memberName}
                         </button>{' '}
-                        · Approved {formatDateTime(rec.reviewedAt || rec.updatedAt)}
-                        {rec.reviewerId ? ` · Reviewer ${rec.reviewerId}` : ''}
+                        · Credited {formatDateTime(rec.approvedAt)}
                       </p>
-                      {rec.proofLink && (
-                        <a
-                          href={rec.proofLink}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-xs text-teal-300 hover:underline mt-0.5"
-                        >
-                          <span className="truncate max-w-xs">{rec.proofLink}</span>
-                          <ExternalLink className="w-3 h-3 shrink-0" />
-                        </a>
-                      )}
                     </div>
                   </div>
                   <span className="font-mono tabular-nums font-bold text-teal-300 text-sm shrink-0">
@@ -2692,290 +2796,32 @@ export function AdminPanel({
       )}
 
       {/* MODAL: Inspect Complete Member Profile, Photo & Activity */}
-      {inspectedMember && (
-        <div
-          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4"
-          onClick={() => setInspectedMember(null)}
-        >
-          <div
-            className="w-full sm:max-w-xl rounded-t-3xl sm:rounded-3xl bg-[#0C1630] border-t sm:border border-white/15 p-6 max-h-[92dvh] overflow-y-auto space-y-5"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {(() => {
-              const liveMember = userByUid.get(inspectedMember.uid) || inspectedMember;
-              const w = walletByUid.get(liveMember.uid);
-              const memberSubs = submissions.filter((s) => s.userId === liveMember.uid);
-              const memberWdrs = withdrawals.filter((wd) => wd.userId === liveMember.uid);
-              const approvedCount = memberSubs.filter((s) => s.status === 'approved').length;
-              const pendingCount = memberSubs.filter((s) => s.status === 'pending').length;
-              const rejectedCount = memberSubs.filter((s) => s.status === 'rejected').length;
-
-              return (
-                <>
-                  {/* Member Photo & Primary Identity */}
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex items-center gap-4 min-w-0">
-                      <AvatarDisplay
-                        photoAssetId={liveMember.photoAssetId}
-                        fullName={liveMember.fullName}
-                        sizeClass="w-20 h-20 text-lg"
-                        zoomable
-                      />
-                      <div className="min-w-0 space-y-1">
-                        <h2 className="text-lg sm:text-xl font-bold text-white truncate">
-                          {liveMember.fullName}
-                        </h2>
-                        <p className="text-xs font-mono tabular-nums text-teal-300 font-semibold">
-                          {liveMember.memberId}
-                          <span aria-hidden="true"> · </span>
-                          <span className="capitalize">{liveMember.status}</span>
-                          <span aria-hidden="true"> · </span>
-                          <span className="capitalize">{liveMember.role}</span>
-                        </p>
-                        <p className="text-xs text-sky-200/70">
-                          {liveMember.photoAssetId
-                            ? 'Tap photo to inspect full size'
-                            : 'Member has not uploaded a profile photo yet'}
-                        </p>
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setInspectedMember(null)}
-                      className="min-h-[44px] min-w-[44px] -mr-2 flex items-center justify-center text-sky-200/75 hover:text-white shrink-0"
-                      aria-label="Close member inspector"
-                    >
-                      <X className="w-5 h-5" />
-                    </button>
-                  </div>
-
-                  {/* Quick Approve / Reject Actions inside Inspector */}
-                  {liveMember.role !== 'admin' && liveMember.status === 'pending' && (
-                    <div className="flex flex-wrap gap-2.5 pt-1">
-                      <button
-                        type="button"
-                        disabled={busyId === liveMember.uid}
-                        onClick={() => handleReviewMember(liveMember.uid, 'approved')}
-                        className="min-h-[42px] px-4 rounded-xl bg-teal-500 hover:bg-teal-400 text-slate-950 text-xs font-semibold"
-                      >
-                        Approve Member Registration
-                      </button>
-                    </div>
-                  )}
-
-                  {liveMember.status === 'rejected' && liveMember.rejectionReason && (
-                    <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-400/25 text-xs text-rose-200">
-                      Rejection reason: {liveMember.rejectionReason}
-                    </div>
-                  )}
-
-                  {/* Wallet & Task KPI Strip */}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 font-mono tabular-nums">
-                    <div className="p-3 rounded-xl bg-[#070E20] border border-white/10">
-                      <p className="font-sans text-[11px] text-sky-200/70">Available Balance</p>
-                      <p className="text-sm font-bold text-teal-300 mt-0.5">
-                        {formatBdt(w?.availableBalance ?? 0)}
-                      </p>
-                    </div>
-                    <div className="p-3 rounded-xl bg-[#070E20] border border-white/10">
-                      <p className="font-sans text-[11px] text-sky-200/70">Total Earnings</p>
-                      <p className="text-sm font-bold text-white mt-0.5">
-                        {formatBdt(w?.totalEarnings ?? liveMember.totalEarnings)}
-                      </p>
-                    </div>
-                    <div className="p-3 rounded-xl bg-[#070E20] border border-white/10">
-                      <p className="font-sans text-[11px] text-sky-200/70">Total Withdrawals</p>
-                      <p className="text-sm font-bold text-white mt-0.5">
-                        {formatBdt(w?.totalWithdrawals ?? 0)}
-                      </p>
-                    </div>
-                    <div className="p-3 rounded-xl bg-[#070E20] border border-white/10">
-                      <p className="font-sans text-[11px] text-sky-200/70">Completed Tasks</p>
-                      <p className="text-sm font-bold text-emerald-400 mt-0.5">{approvedCount}</p>
-                    </div>
-                  </div>
-
-                  {/* Complete Member Personal & Account Details */}
-                  <div className="divide-y divide-white/8 border-t border-b border-white/10 text-xs sm:text-sm">
-                    <div className="py-2.5 flex justify-between gap-4">
-                      <span className="text-sky-200/70">Full Name</span>
-                      <span className="text-white font-medium text-right">{liveMember.fullName}</span>
-                    </div>
-                    <div className="py-2.5 flex justify-between gap-4">
-                      <span className="text-sky-200/70">Unique Member ID</span>
-                      <span className="font-mono tabular-nums text-teal-300 font-semibold">
-                        {liveMember.memberId}
-                      </span>
-                    </div>
-                    <div className="py-2.5 flex justify-between gap-4">
-                      <span className="text-sky-200/70">Email Address</span>
-                      <span className="text-white break-all text-right">{liveMember.email}</span>
-                    </div>
-                    <div className="py-2.5 flex justify-between gap-4">
-                      <span className="text-sky-200/70">Mobile / bKash-Nagad</span>
-                      <span className="font-mono tabular-nums text-white">
-                        {liveMember.phone || 'Not provided'}
-                      </span>
-                    </div>
-                    <div className="py-2.5 flex justify-between gap-4">
-                      <span className="text-sky-200/70">Sign-In Method</span>
-                      <span className="text-white">
-                        {liveMember.authProvider === 'google.com' ? 'Google OAuth' : 'Email & Password'}
-                      </span>
-                    </div>
-                    <div className="py-2.5 flex justify-between gap-4">
-                      <span className="text-sky-200/70">Registered On</span>
-                      <span className="font-mono tabular-nums text-sky-100">
-                        {formatDateTime(liveMember.createdAt)}
-                      </span>
-                    </div>
-                    <div className="py-2.5 flex justify-between gap-4">
-                      <span className="text-sky-200/70">Last Profile Update</span>
-                      <span className="font-mono tabular-nums text-sky-100">
-                        {formatDateTime(liveMember.updatedAt)}
-                      </span>
-                    </div>
-                    <div className="py-2.5 flex justify-between gap-4">
-                      <span className="text-sky-200/70">Proof Submissions</span>
-                      <span className="font-mono tabular-nums text-white">
-                        {approvedCount} Approved · {pendingCount} Pending · {rejectedCount} Rejected
-                      </span>
-                    </div>
-                    <div className="py-2.5 flex justify-between gap-4">
-                      <span className="text-sky-200/70">Withdrawal Fees & Reserved</span>
-                      <span className="font-mono tabular-nums text-white">
-                        Fees {formatBdt(w?.totalWithdrawalFees ?? 0)} · Reserved{' '}
-                        {formatBdt(w?.reservedWithdrawals ?? 0)}
-                      </span>
-                    </div>
-                    {liveMember.lastPasswordChangedAt && (
-                      <div className="py-2.5 flex justify-between gap-4">
-                        <span className="text-sky-200/70">Last Password Update</span>
-                        <span className="font-mono tabular-nums text-sky-100">
-                          {formatDateTime(liveMember.lastPasswordChangedAt)}
-                        </span>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Recent Member Task Submissions */}
-                  {memberSubs.length > 0 && (
-                    <div className="space-y-2">
-                      <h3 className="text-xs font-semibold text-sky-200/80">
-                        Recent Proof Submissions ({memberSubs.length})
-                      </h3>
-                      <div className="divide-y divide-white/8 rounded-xl bg-[#070E20] border border-white/10 px-3.5">
-                        {memberSubs.slice(0, 5).map((s) => (
-                          <div key={s.submissionId} className="py-3 text-xs space-y-2">
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-white font-medium truncate">
-                                {s.taskCode} · {s.taskTitle}
-                              </span>
-                              <span className="font-mono tabular-nums text-teal-300 shrink-0 capitalize">
-                                {s.status} ({formatBdt(s.rewardAmount)})
-                              </span>
-                            </div>
-                            {s.proofLink && (
-                              <a
-                                href={s.proofLink}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1 text-teal-300 hover:underline"
-                              >
-                                <span className="truncate max-w-xs">{s.proofLink}</span>
-                                <ExternalLink className="w-3 h-3 shrink-0" />
-                              </a>
-                            )}
-                            {s.status === 'pending' && (
-                              <div className="space-y-2 pt-1">
-                                <div className="flex items-center gap-2">
-                                  <button
-                                    type="button"
-                                    disabled={busyId === s.submissionId}
-                                    onClick={() =>
-                                      handleReviewSubmission(s.submissionId, 'approved')
-                                    }
-                                    className="min-h-[36px] px-3 rounded-lg bg-teal-500 hover:bg-teal-400 disabled:opacity-50 text-slate-950 text-xs font-semibold"
-                                  >
-                                    {busyId === s.submissionId && busyDecision === 'approved'
-                                      ? 'Approving...'
-                                      : `Approve ${formatBdt(s.rewardAmount)}`}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={busyId === s.submissionId}
-                                    onClick={() => {
-                                      setInspectorRejectSubId(s.submissionId);
-                                      setInspectorRejectReason('');
-                                    }}
-                                    className="min-h-[36px] px-3 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 disabled:opacity-50 text-rose-200 text-xs font-semibold"
-                                  >
-                                    Reject
-                                  </button>
-                                </div>
-                                {inspectorRejectSubId === s.submissionId && (
-                                  <div className="flex flex-col sm:flex-row gap-2">
-                                    <input
-                                      type="text"
-                                      maxLength={MAX_REASON_LENGTH}
-                                      value={inspectorRejectReason}
-                                      onChange={(e) => setInspectorRejectReason(e.target.value)}
-                                      placeholder="Required rejection reason..."
-                                      className="flex-1 min-h-[36px] px-2.5 rounded-lg bg-[#0B142C] border border-white/15 text-xs text-white"
-                                    />
-                                    <button
-                                      type="button"
-                                      disabled={busyId === s.submissionId}
-                                      onClick={() =>
-                                        handleReviewSubmission(
-                                          s.submissionId,
-                                          'rejected',
-                                          inspectorRejectReason
-                                        )
-                                      }
-                                      className="min-h-[36px] px-3 rounded-lg bg-rose-500 text-slate-950 text-xs font-semibold"
-                                    >
-                                      Confirm Reject
-                                    </button>
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Recent Member Withdrawals */}
-                  {memberWdrs.length > 0 && (
-                    <div className="space-y-2">
-                      <h3 className="text-xs font-semibold text-sky-200/80">
-                        Recent Withdrawals ({memberWdrs.length})
-                      </h3>
-                      <div className="divide-y divide-white/8 rounded-xl bg-[#070E20] border border-white/10 px-3.5">
-                        {memberWdrs.slice(0, 5).map((wd) => (
-                          <div
-                            key={wd.withdrawalId}
-                            className="py-2.5 text-xs flex items-center justify-between gap-2 font-mono tabular-nums"
-                          >
-                            <span className="text-white truncate">
-                              {wd.transactionCode} · {wd.payoutMethod} {wd.accountNumber}
-                            </span>
-                            <span className="text-teal-300 shrink-0 capitalize">
-                              {wd.status} · Net {formatBdt(wd.netAmount)}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </>
-              );
-            })()}
-          </div>
-        </div>
-      )}
+      {inspectedMember && (() => {
+        const liveMember = userByUid.get(inspectedMember.uid) || inspectedMember;
+        const w = walletByUid.get(liveMember.uid);
+        const memberSubs = submissions.filter((s) => s.userId === liveMember.uid);
+        const memberWdrs = withdrawals.filter((wd) => wd.userId === liveMember.uid);
+        const memberCreditedCount = unreversedRewards.rewards.filter((tx) => tx.userId === liveMember.uid).length;
+        const approvedCount = Math.max(Number(liveMember.completedTasksCount || 0), memberCreditedCount);
+        return (
+          <AdminInspectedMemberModal
+            liveMember={liveMember}
+            wallet={w}
+            memberSubs={memberSubs}
+            memberWdrs={memberWdrs}
+            approvedCount={approvedCount}
+            busyId={busyId}
+            busyDecision={busyDecision}
+            inspectorRejectSubId={inspectorRejectSubId}
+            inspectorRejectReason={inspectorRejectReason}
+            setInspectorRejectSubId={setInspectorRejectSubId}
+            setInspectorRejectReason={setInspectorRejectReason}
+            onClose={() => setInspectedMember(null)}
+            onReviewMember={handleReviewMember}
+            onReviewSubmission={handleReviewSubmission}
+          />
+        );
+      })()}
     </div>
   );
 }
