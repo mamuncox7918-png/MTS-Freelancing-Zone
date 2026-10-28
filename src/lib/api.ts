@@ -98,8 +98,10 @@ export async function apiRequest<T = Record<string, unknown>>(
 
     const contentType = res.headers.get('content-type') || '';
     if (!contentType.includes('application/json')) {
-      // Static host (e.g., Netlify/Vercel/Firebase Hosting) returned SPA HTML instead of Express JSON API
-      staticHostDetected = true;
+      if (res.ok) {
+        // Static host (e.g., Netlify/Vercel/Firebase Hosting) returned SPA HTML instead of Express JSON API
+        staticHostDetected = true;
+      }
       return await executeClientFirestoreFallback<T>(path, method, options.body);
     }
 

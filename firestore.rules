@@ -1101,7 +1101,7 @@ service cloud.firestore {
 
     match /monthlyMemberEarnings/{entryId} {
       allow get: if isSignedIn() && isValidId(entryId);
-      allow list: if isSignedIn();
+      allow list: if isSignedIn() && ('monthKey' in resource.data);
       allow create: if isSignedIn() && isValidId(entryId) && isValidMonthlyMemberEarning(incoming()) &&
         incoming().entryId == entryId &&
         incoming().createdAt == request.time &&
@@ -1118,14 +1118,17 @@ service cloud.firestore {
           )
         );
       allow update: if isSignedIn() && isValidId(entryId) && isValidMonthlyMemberEarning(incoming()) &&
-        incoming().entryId == existing().entryId &&
-        incoming().monthKey == existing().monthKey &&
-        incoming().userId == existing().userId &&
-        incoming().createdAt == existing().createdAt &&
+        incoming().entryId == entryId &&
+        (!('monthKey' in existing()) || incoming().monthKey == existing().monthKey) &&
+        (!('userId' in existing()) || incoming().userId == existing().userId) &&
+        (('createdAt' in existing() && incoming().createdAt == existing().createdAt) || (isAdmin() && incoming().createdAt == request.time)) &&
         incoming().updatedAt == request.time && (
           isAdmin() ||
           (
             isAssistantAdmin() &&
+            'userId' in existing() &&
+            'createdAt' in existing() &&
+            incoming().createdAt == existing().createdAt &&
             existing().isEligibleMember == true &&
             incoming().isEligibleMember == true &&
             isValidId(incoming().lastSubmissionId) &&
@@ -1136,6 +1139,9 @@ service cloud.firestore {
             incoming().eligibleEarnings == existing().eligibleEarnings + get(/databases/$(database)/documents/submissions/$(incoming().lastSubmissionId)).data.rewardAmount
           ) ||
           (
+            'userId' in existing() &&
+            'createdAt' in existing() &&
+            incoming().createdAt == existing().createdAt &&
             request.auth.uid == existing().userId &&
             incoming().isEligibleMember == existing().isEligibleMember &&
             incoming().eligibleEarnings == existing().eligibleEarnings &&
@@ -1151,15 +1157,16 @@ service cloud.firestore {
 
     match /leaderboardPeriods/{monthKey} {
       allow get: if isSignedIn() && isValidId(monthKey);
-      allow list: if isSignedIn();
+      allow list: if isSignedIn() && ('monthKey' in resource.data);
       allow create: if isVerifiedAdminAuth() && isValidId(monthKey) && isValidLeaderboardPeriod(incoming()) &&
         incoming().monthKey == monthKey &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
         isAdmin();
       allow update: if isVerifiedAdminAuth() && isValidId(monthKey) && isValidLeaderboardPeriod(incoming()) &&
-        incoming().monthKey == existing().monthKey &&
-        incoming().createdAt == existing().createdAt &&
+        incoming().monthKey == monthKey &&
+        (!('monthKey' in existing()) || incoming().monthKey == existing().monthKey) &&
+        (('createdAt' in existing() && incoming().createdAt == existing().createdAt) || incoming().createdAt == request.time) &&
         incoming().updatedAt == request.time &&
         isAdmin();
       allow delete: if false;
@@ -1167,17 +1174,17 @@ service cloud.firestore {
 
     match /leaderboardWinners/{winnerId} {
       allow get: if isSignedIn() && isValidId(winnerId);
-      allow list: if isSignedIn();
+      allow list: if isSignedIn() && ('monthKey' in resource.data);
       allow create: if isVerifiedAdminAuth() && isValidId(winnerId) && isValidLeaderboardWinner(incoming()) &&
         incoming().winnerId == winnerId &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
         isAdmin();
       allow update: if isVerifiedAdminAuth() && isValidId(winnerId) && isValidLeaderboardWinner(incoming()) &&
-        incoming().winnerId == existing().winnerId &&
-        incoming().monthKey == existing().monthKey &&
-        incoming().rank == existing().rank &&
-        incoming().createdAt == existing().createdAt &&
+        incoming().winnerId == winnerId &&
+        (!('monthKey' in existing()) || incoming().monthKey == existing().monthKey) &&
+        (!('rank' in existing()) || incoming().rank == existing().rank) &&
+        (('createdAt' in existing() && incoming().createdAt == existing().createdAt) || incoming().createdAt == request.time) &&
         incoming().updatedAt == request.time &&
         isAdmin();
       allow delete: if isVerifiedAdminAuth() && isValidId(winnerId) && isAdmin();
@@ -1192,10 +1199,10 @@ service cloud.firestore {
         incoming().updatedAt == request.time &&
         isAdmin();
       allow update: if isVerifiedAdminAuth() && isValidId(winnerId) && isValidLeaderboardAdminNote(incoming()) &&
-        incoming().winnerId == existing().winnerId &&
-        incoming().monthKey == existing().monthKey &&
-        incoming().rank == existing().rank &&
-        incoming().createdAt == existing().createdAt &&
+        incoming().winnerId == winnerId &&
+        (!('monthKey' in existing()) || incoming().monthKey == existing().monthKey) &&
+        (!('rank' in existing()) || incoming().rank == existing().rank) &&
+        (('createdAt' in existing() && incoming().createdAt == existing().createdAt) || incoming().createdAt == request.time) &&
         incoming().updatedAt == request.time &&
         isAdmin();
       allow delete: if isVerifiedAdminAuth() && isValidId(winnerId) && isAdmin();

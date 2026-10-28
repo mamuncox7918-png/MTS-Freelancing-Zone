@@ -11,6 +11,22 @@ import type {
  */
 export const DHAKA_UTC_OFFSET_MS = 6 * 60 * 60 * 1000;
 export const MONTH_KEY_REGEX = /^[0-9]{4}-(0[1-9]|1[0-2])$/;
+export const VALID_FIRESTORE_ID_REGEX = /^[a-zA-Z0-9_\-]+$/;
+
+export function sanitizeFirestoreId(val: unknown, fallback = ''): string {
+  if (typeof val !== 'string') return fallback;
+  const trimmed = val.trim();
+  if (trimmed.length >= 1 && trimmed.length <= 128 && VALID_FIRESTORE_ID_REGEX.test(trimmed)) {
+    return trimmed;
+  }
+  return fallback;
+}
+
+export function sanitizeMemberCode(val: unknown, fallback = 'MTS-000000'): string {
+  if (typeof val !== 'string') return fallback;
+  const trimmed = val.trim().slice(0, 20);
+  return trimmed.length >= 6 ? trimmed : fallback;
+}
 
 const MONTH_NAMES = [
   'January',
@@ -302,8 +318,11 @@ export function computeMonthlyLeaderboardFromTransactions(
     Pick<UserProfile, 'uid' | 'memberId' | 'fullName' | 'photoAssetId' | 'role' | 'status'>
   >();
   for (const u of users) {
-    if (u && u.uid) {
-      userMap.set(u.uid, u);
+    if (u && sanitizeFirestoreId(u.uid)) {
+      const cleanUid = u.uid.trim();
+      if (buildMonthlyEntryId(monthKey, cleanUid).length <= 128) {
+        userMap.set(cleanUid, u);
+      }
     }
   }
 
@@ -390,19 +409,33 @@ export function computeMonthlyLeaderboardFromTransactions(
     }
 
     if (total > 0) {
-      allMemberStats.push({
-        userId,
-        memberId: owner.memberId,
-        displayName: owner.fullName,
-        photoAssetId: owner.photoAssetId || '',
-        isEligibleMember: true,
-        eligibleEarnings: total,
-        approvedTaskCount: items.length,
-        reachedAtMs,
-        lastTransactionId: lastTxId,
-        lastSubmissionId: lastSubId,
-        transactions: items.map((i) => i.tx),
-      });
+      const safeMemberId = sanitizeMemberCode(owner.memberId);
+      const safeDisplayName =
+        (typeof owner.fullName === 'string' ? owner.fullName.trim() : '').slice(0, 300) ||
+        safeMemberId;
+      const safePhotoAssetId = sanitizeFirestoreId(owner.photoAssetId, '');
+      const safeEarnings = Math.min(100000000, Math.max(0, Math.round(total * 100) / 100));
+      const safeTaskCount = Math.min(1000000, Math.max(1, items.length));
+      const safeReachedAtMs = Math.max(
+        0,
+        Math.floor(Number.isFinite(reachedAtMs) ? reachedAtMs : 0)
+      );
+
+      if (safeEarnings > 0) {
+        allMemberStats.push({
+          userId,
+          memberId: safeMemberId,
+          displayName: safeDisplayName,
+          photoAssetId: safePhotoAssetId,
+          isEligibleMember: true,
+          eligibleEarnings: safeEarnings,
+          approvedTaskCount: safeTaskCount,
+          reachedAtMs: safeReachedAtMs,
+          lastTransactionId: sanitizeFirestoreId(lastTxId, 'admin_sync'),
+          lastSubmissionId: sanitizeFirestoreId(lastSubId, ''),
+          transactions: items.map((i) => i.tx),
+        });
+      }
     }
   }
 

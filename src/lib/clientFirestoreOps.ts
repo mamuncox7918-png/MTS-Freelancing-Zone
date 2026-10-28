@@ -19,6 +19,7 @@ import {
 import {
   FIXED_WITHDRAWAL_FEE,
   MIN_WITHDRAWAL_GROSS,
+  type LeaderboardRankRewardConfig,
   type UserProfile,
   type WalletTransaction,
 } from '../types';
@@ -32,6 +33,8 @@ import {
   getUnreversedRewardTransactions,
   isValidMonthKey,
   normalizeRewardConfigs,
+  sanitizeFirestoreId,
+  sanitizeMemberCode,
 } from './leaderboard';
 
 type BatchOp = (batch: ReturnType<typeof writeBatch>) => void;
@@ -69,6 +72,205 @@ function randomDocId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${hex}`;
 }
 
+function preservedOrServerTimestamp(val: unknown): unknown {
+  if (
+    val &&
+    typeof val === 'object' &&
+    typeof (val as { toMillis?: unknown }).toMillis === 'function' &&
+    typeof (val as { seconds?: unknown }).seconds === 'number'
+  ) {
+    return val;
+  }
+  return serverTimestamp();
+}
+
+function buildNormalizedMonthlyEarningPayload(
+  params: {
+    entryId: string;
+    monthKey: string;
+    userId: string;
+    displayName: string;
+    photoAssetId: unknown;
+    isEligibleMember: boolean;
+    eligibleEarnings: number;
+    approvedTaskCount: number;
+    reachedAtMs: number;
+    lastTransactionId: unknown;
+    lastSubmissionId: unknown;
+  },
+  existing?: Record<string, unknown>
+) {
+  const safeDisplayName =
+    (typeof params.displayName === 'string' ? params.displayName.trim() : '').slice(0, 300) ||
+    'Member';
+  const safeEarnings = Number.isFinite(params.eligibleEarnings)
+    ? Math.min(100000000, Math.max(0, Math.round(params.eligibleEarnings * 100) / 100))
+    : 0;
+  const safeTaskCount = Number.isFinite(params.approvedTaskCount)
+    ? Math.min(1000000, Math.max(0, Math.floor(params.approvedTaskCount)))
+    : 0;
+  const safeReachedMs = Number.isFinite(params.reachedAtMs)
+    ? Math.max(0, Math.floor(params.reachedAtMs))
+    : 0;
+
+  return {
+    entryId: params.entryId,
+    monthKey: params.monthKey,
+    userId: params.userId,
+    displayName: safeDisplayName,
+    photoAssetId: sanitizeFirestoreId(params.photoAssetId, ''),
+    isEligibleMember: Boolean(params.isEligibleMember),
+    eligibleEarnings: safeEarnings,
+    approvedTaskCount: safeTaskCount,
+    reachedAtMs: safeReachedMs,
+    lastTransactionId: sanitizeFirestoreId(params.lastTransactionId, 'admin_sync'),
+    lastSubmissionId: sanitizeFirestoreId(params.lastSubmissionId, ''),
+    createdAt: existing ? preservedOrServerTimestamp(existing.createdAt) : serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+}
+
+function buildNormalizedPeriodPayload(
+  monthKey: string,
+  overrides: {
+    status?: 'open' | 'finalized';
+    rewardsPublished?: boolean;
+    announcementDate?: string;
+    rewardNote?: string;
+    rewards?: LeaderboardRankRewardConfig[];
+    finalizedAt?: string;
+    finalizedBy?: string;
+    winnerCount?: number;
+    lastSyncedAt?: string;
+  },
+  existing?: Record<string, unknown>
+) {
+  const status =
+    overrides.status ?? (existing?.status === 'finalized' ? 'finalized' : 'open');
+  const rewardsPublished =
+    overrides.rewardsPublished ?? Boolean(existing?.rewardsPublished);
+  const rawAnnouncement =
+    overrides.announcementDate ??
+    (typeof existing?.announcementDate === 'string' ? existing.announcementDate : '');
+  const rawRewardNote =
+    overrides.rewardNote ??
+    (typeof existing?.rewardNote === 'string' ? existing.rewardNote : '');
+  const rewards = normalizeRewardConfigs(overrides.rewards ?? existing?.rewards);
+  const rawFinalizedAt =
+    overrides.finalizedAt ??
+    (typeof existing?.finalizedAt === 'string' ? existing.finalizedAt : '');
+  const rawFinalizedBy =
+    overrides.finalizedBy ??
+    (typeof existing?.finalizedBy === 'string' ? existing.finalizedBy : '');
+  const rawWinnerCount = Number(overrides.winnerCount ?? existing?.winnerCount ?? 0);
+  const winnerCount = Number.isFinite(rawWinnerCount)
+    ? Math.min(10, Math.max(0, Math.floor(rawWinnerCount)))
+    : 0;
+  const rawLastSyncedAt =
+    overrides.lastSyncedAt ??
+    (typeof existing?.lastSyncedAt === 'string' ? existing.lastSyncedAt : new Date().toISOString());
+
+  return {
+    monthKey,
+    status,
+    rewardsPublished,
+    announcementDate: rawAnnouncement.trim().slice(0, 40),
+    rewardNote: rawRewardNote.trim().slice(0, 1000),
+    rewards,
+    finalizedAt: rawFinalizedAt.trim().slice(0, 40),
+    finalizedBy: sanitizeFirestoreId(rawFinalizedBy, ''),
+    winnerCount,
+    lastSyncedAt: rawLastSyncedAt.trim().slice(0, 40),
+    createdAt: existing ? preservedOrServerTimestamp(existing.createdAt) : serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+}
+
+function buildNormalizedWinnerPayload(
+  params: {
+    winnerId: string;
+    monthKey: string;
+    rank: number;
+    userId: string;
+    displayName: string;
+    photoAssetId: unknown;
+    eligibleEarnings: number;
+    approvedTaskCount: number;
+    reachedAtMs: number;
+    prizeTitle: string;
+    prizeDescription: string;
+    monetaryValue: number;
+    rewardStatus: unknown;
+    deliveredAt: unknown;
+  },
+  existing?: Record<string, unknown>
+) {
+  const validStatus =
+    params.rewardStatus === 'pending' ||
+    params.rewardStatus === 'approved' ||
+    params.rewardStatus === 'awarded' ||
+    params.rewardStatus === 'cancelled'
+      ? params.rewardStatus
+      : 'pending';
+  const rawMonetary = Number(params.monetaryValue || 0);
+
+  return {
+    winnerId: params.winnerId,
+    monthKey: params.monthKey,
+    rank: Math.min(10, Math.max(1, Math.floor(params.rank))),
+    userId: params.userId,
+    displayName:
+      (typeof params.displayName === 'string' ? params.displayName.trim() : '').slice(0, 300) ||
+      'Member',
+    photoAssetId: sanitizeFirestoreId(params.photoAssetId, ''),
+    eligibleEarnings: Math.min(
+      100000000,
+      Math.max(0.01, Math.round(Number(params.eligibleEarnings || 0) * 100) / 100)
+    ),
+    approvedTaskCount: Math.min(
+      1000000,
+      Math.max(1, Math.floor(Number(params.approvedTaskCount || 1)))
+    ),
+    reachedAtMs: Math.max(0, Math.floor(Number(params.reachedAtMs || 0))),
+    prizeTitle: (params.prizeTitle || '').trim().slice(0, 160),
+    prizeDescription: (params.prizeDescription || '').trim().slice(0, 500),
+    monetaryValue:
+      Number.isFinite(rawMonetary) && rawMonetary >= 0
+        ? Math.min(10000000, Math.round(rawMonetary))
+        : 0,
+    rewardStatus: validStatus,
+    deliveredAt:
+      typeof params.deliveredAt === 'string' ? params.deliveredAt.trim().slice(0, 40) : '',
+    createdAt: existing ? preservedOrServerTimestamp(existing.createdAt) : serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+}
+
+function buildNormalizedAdminNotePayload(
+  params: {
+    winnerId: string;
+    monthKey: string;
+    rank: number;
+    userId: string;
+    memberId: unknown;
+    adminNote: unknown;
+    updatedBy: string;
+  },
+  existing?: Record<string, unknown>
+) {
+  return {
+    winnerId: params.winnerId,
+    monthKey: params.monthKey,
+    rank: Math.min(10, Math.max(1, Math.floor(params.rank))),
+    userId: params.userId,
+    memberId: sanitizeMemberCode(params.memberId),
+    adminNote: typeof params.adminNote === 'string' ? params.adminNote.trim().slice(0, 1000) : '',
+    updatedBy: params.updatedBy,
+    createdAt: existing ? preservedOrServerTimestamp(existing.createdAt) : serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+}
+
 function wrapPermError(err: unknown, op: OperationType, path: string): never {
   if (err instanceof Error && err.message.includes('Missing or insufficient permissions')) {
     handleFirestoreError(err, op, path);
@@ -87,7 +289,15 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
   }
 
   const uid = currentUser.uid;
-  const email = (currentUser.email || '').trim().toLowerCase();
+  const rawEmail = (
+    currentUser.email ||
+    currentUser.providerData?.find((p) => p?.email)?.email ||
+    ''
+  )
+    .trim()
+    .toLowerCase();
+  const email = rawEmail;
+  const auditAdminEmail = (rawEmail || 'admin@mts.local').slice(0, 150);
   const isInitialAdmin = Boolean(currentUser.emailVerified) && email === BOOTSTRAPPED_ADMIN_EMAIL;
 
   // 1. POST /api/auth/register
@@ -794,42 +1004,43 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
             updatedAt: serverTimestamp(),
           });
 
-          if (memberData.role === 'member' && memberData.status === 'approved') {
-            const displayName = String(
-              memberData.fullName || subData.memberName || 'Member'
-            ).slice(0, 300);
-            const photoAssetId = String(memberData.photoAssetId || '');
+          if (
+            memberData.role === 'member' &&
+            memberData.status === 'approved' &&
+            monthlyEntryId.length <= 128
+          ) {
+            const displayName =
+              String(memberData.fullName || subData.memberName || 'Member')
+                .trim()
+                .slice(0, 300) || 'Member';
             const entryRef = doc(db, 'monthlyMemberEarnings', monthlyEntryId);
-            if (monthlyEntrySnap && monthlyEntrySnap.exists()) {
-              const prevEntry = monthlyEntrySnap.data();
-              batch.update(entryRef, {
-                displayName,
-                photoAssetId,
-                isEligibleMember: true,
-                eligibleEarnings: Number(prevEntry.eligibleEarnings || 0) + rewardAmount,
-                approvedTaskCount: Number(prevEntry.approvedTaskCount || 0) + 1,
-                reachedAtMs: Math.max(nowMs, Number(prevEntry.reachedAtMs || 0)),
-                lastTransactionId: txId,
-                lastSubmissionId: submissionId,
-                updatedAt: serverTimestamp(),
-              });
-            } else {
-              batch.set(entryRef, {
-                entryId: monthlyEntryId,
-                monthKey,
-                userId: memberUid,
-                displayName,
-                photoAssetId,
-                isEligibleMember: true,
-                eligibleEarnings: rewardAmount,
-                approvedTaskCount: 1,
-                reachedAtMs: nowMs,
-                lastTransactionId: txId,
-                lastSubmissionId: submissionId,
-                createdAt: serverTimestamp(),
-                updatedAt: serverTimestamp(),
-              });
-            }
+            const prevEntry =
+              monthlyEntrySnap && monthlyEntrySnap.exists()
+                ? (monthlyEntrySnap.data() as Record<string, unknown>)
+                : undefined;
+            batch.set(
+              entryRef,
+              buildNormalizedMonthlyEarningPayload(
+                {
+                  entryId: monthlyEntryId,
+                  monthKey,
+                  userId: memberUid,
+                  displayName,
+                  photoAssetId: memberData.photoAssetId,
+                  isEligibleMember: true,
+                  eligibleEarnings:
+                    (prevEntry ? Number(prevEntry.eligibleEarnings || 0) : 0) + rewardAmount,
+                  approvedTaskCount:
+                    (prevEntry ? Number(prevEntry.approvedTaskCount || 0) : 0) + 1,
+                  reachedAtMs: prevEntry
+                    ? Math.max(nowMs, Number(prevEntry.reachedAtMs || 0))
+                    : nowMs,
+                  lastTransactionId: txId,
+                  lastSubmissionId: submissionId,
+                },
+                prevEntry
+              )
+            );
           }
         }
 
@@ -1564,42 +1775,44 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
             updatedAt: serverTimestamp(),
           });
 
-          if (memberData.role === 'member' && memberData.status === 'approved') {
-            const displayName = String(
-              memberData.fullName || ctData.memberName || 'Member'
-            ).slice(0, 300);
-            const photoAssetId = String(memberData.photoAssetId || '');
+          if (
+            memberData.role === 'member' &&
+            memberData.status === 'approved' &&
+            monthlyEntryId.length <= 128
+          ) {
+            const displayName =
+              String(memberData.fullName || ctData.memberName || 'Member')
+                .trim()
+                .slice(0, 300) || 'Member';
             const entryRef = doc(db, 'monthlyMemberEarnings', monthlyEntryId);
-            if (monthlyEntrySnap && monthlyEntrySnap.exists()) {
-              const prevEntry = monthlyEntrySnap.data();
-              batch.update(entryRef, {
-                displayName,
-                photoAssetId,
-                isEligibleMember: true,
-                eligibleEarnings: Number(prevEntry.eligibleEarnings || 0) + finalApprovedAmount,
-                approvedTaskCount: Number(prevEntry.approvedTaskCount || 0) + 1,
-                reachedAtMs: Math.max(nowMs, Number(prevEntry.reachedAtMs || 0)),
-                lastTransactionId: txId,
-                lastSubmissionId: customTaskId,
-                updatedAt: serverTimestamp(),
-              });
-            } else {
-              batch.set(entryRef, {
-                entryId: monthlyEntryId,
-                monthKey,
-                userId: memberUid,
-                displayName,
-                photoAssetId,
-                isEligibleMember: true,
-                eligibleEarnings: finalApprovedAmount,
-                approvedTaskCount: 1,
-                reachedAtMs: nowMs,
-                lastTransactionId: txId,
-                lastSubmissionId: customTaskId,
-                createdAt: serverTimestamp(),
-                updatedAt: serverTimestamp(),
-              });
-            }
+            const prevEntry =
+              monthlyEntrySnap && monthlyEntrySnap.exists()
+                ? (monthlyEntrySnap.data() as Record<string, unknown>)
+                : undefined;
+            batch.set(
+              entryRef,
+              buildNormalizedMonthlyEarningPayload(
+                {
+                  entryId: monthlyEntryId,
+                  monthKey,
+                  userId: memberUid,
+                  displayName,
+                  photoAssetId: memberData.photoAssetId,
+                  isEligibleMember: true,
+                  eligibleEarnings:
+                    (prevEntry ? Number(prevEntry.eligibleEarnings || 0) : 0) +
+                    finalApprovedAmount,
+                  approvedTaskCount:
+                    (prevEntry ? Number(prevEntry.approvedTaskCount || 0) : 0) + 1,
+                  reachedAtMs: prevEntry
+                    ? Math.max(nowMs, Number(prevEntry.reachedAtMs || 0))
+                    : nowMs,
+                  lastTransactionId: txId,
+                  lastSubmissionId: customTaskId,
+                },
+                prevEntry
+              )
+            );
           }
         }
 
@@ -1759,54 +1972,67 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
       const nowIso = new Date().toISOString();
       const logId = randomDocId('log');
       const ops: BatchOp[] = [];
+      const existingPeriodData = periodSnap.exists()
+        ? (periodSnap.data() as Record<string, unknown>)
+        : undefined;
 
-      if (periodSnap.exists()) {
-        ops.push((b) =>
-          b.update(periodRef, {
-            rewardsPublished,
-            announcementDate,
-            rewardNote,
-            rewards,
-            updatedAt: serverTimestamp(),
-          })
-        );
-      } else {
-        ops.push((b) =>
-          b.set(periodRef, {
+      ops.push((b) =>
+        b.set(
+          periodRef,
+          buildNormalizedPeriodPayload(
             monthKey,
-            status: 'open',
-            rewardsPublished,
-            announcementDate,
-            rewardNote,
-            rewards,
-            finalizedAt: '',
-            finalizedBy: '',
-            winnerCount: 0,
-            lastSyncedAt: nowIso,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          })
-        );
-      }
+            {
+              rewardsPublished,
+              announcementDate,
+              rewardNote,
+              rewards,
+              lastSyncedAt: existingPeriodData
+                ? String(existingPeriodData.lastSyncedAt || nowIso)
+                : nowIso,
+            },
+            existingPeriodData
+          )
+        )
+      );
 
       if (isFinalized) {
         const winSnap = await getDocs(
           query(collection(db, 'leaderboardWinners'), where('monthKey', '==', monthKey))
         );
         for (const wDoc of winSnap.docs) {
-          const wData = wDoc.data();
+          const wData = wDoc.data() as Record<string, unknown>;
+          const winnerId = wDoc.id;
           const r = Number(wData.rank);
           const slot = rewards[r - 1];
           const prizeTitle = slot && slot.enabled ? slot.prizeTitle : '';
           const prizeDescription = slot && slot.enabled ? slot.prizeDescription : '';
           const monetaryValue = slot && slot.enabled ? slot.monetaryValue : 0;
+          const winUserId = sanitizeFirestoreId(wData.userId, '');
+          if (!winUserId) continue;
+
           ops.push((b) =>
-            b.update(doc(db, 'leaderboardWinners', String(wData.winnerId)), {
-              prizeTitle,
-              prizeDescription,
-              monetaryValue,
-              updatedAt: serverTimestamp(),
-            })
+            b.set(
+              doc(db, 'leaderboardWinners', winnerId),
+              buildNormalizedWinnerPayload(
+                {
+                  winnerId,
+                  monthKey,
+                  rank: r,
+                  userId: winUserId,
+                  displayName: String(wData.displayName || 'Member'),
+                  photoAssetId: wData.photoAssetId,
+                  eligibleEarnings: Number(wData.eligibleEarnings || 1),
+                  approvedTaskCount: Number(wData.approvedTaskCount || 1),
+                  reachedAtMs: Number(wData.reachedAtMs || 0),
+                  prizeTitle,
+                  prizeDescription,
+                  monetaryValue,
+                  rewardStatus: wData.rewardStatus,
+                  deliveredAt: wData.deliveredAt,
+                },
+                wData
+              )
+            )
           );
         }
       }
@@ -1816,7 +2042,7 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
         b.set(doc(db, 'adminAuditLogs', logId), {
           logId,
           adminUid: uid,
-          adminEmail: email,
+          adminEmail: auditAdminEmail,
           action: isFinalized
             ? 'FINALIZED_LEADERBOARD_REWARDS_UPDATED'
             : 'LEADERBOARD_REWARDS_UPDATED',
@@ -1850,7 +2076,10 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
     try {
       const periodRef = doc(db, 'leaderboardPeriods', monthKey);
       const periodSnap = await getDoc(periodRef);
-      const isFinalized = periodSnap.exists() && periodSnap.data().status === 'finalized';
+      const existingPeriodData = periodSnap.exists()
+        ? (periodSnap.data() as Record<string, unknown>)
+        : undefined;
+      const isFinalized = existingPeriodData?.status === 'finalized';
 
       if (isFinalized && silentAutoSync) {
         return { ok: true, skippedFinalized: true } as unknown as T;
@@ -1878,15 +2107,20 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
         userSnap.docs.map((d) => d.data() as UserProfile)
       );
 
-      const existingByEntryId = new Map(
-        existingEntriesSnap.docs.map((d) => [String(d.data().entryId), d.data()])
-      );
+      const existingByEntryId = new Map<string, Record<string, unknown>>();
+      for (const d of existingEntriesSnap.docs) {
+        if (VALID_ID_REGEX.test(d.id) && d.id.length <= 128) {
+          existingByEntryId.set(d.id, d.data() as Record<string, unknown>);
+        }
+      }
+
       const activeEntryIds = new Set<string>();
       const ops: BatchOp[] = [];
       let changedCount = 0;
 
       for (const stat of computed.allMemberStats) {
         const entryId = buildMonthlyEntryId(monthKey, stat.userId);
+        if (entryId.length > 128 || !VALID_ID_REGEX.test(entryId)) continue;
         activeEntryIds.add(entryId);
         const prev = existingByEntryId.get(entryId);
         const entryRef = doc(db, 'monthlyMemberEarnings', entryId);
@@ -1897,12 +2131,41 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
             Number(prev.approvedTaskCount) === stat.approvedTaskCount &&
             Number(prev.reachedAtMs) === stat.reachedAtMs &&
             prev.displayName === stat.displayName &&
-            prev.photoAssetId === stat.photoAssetId &&
+            sanitizeFirestoreId(prev.photoAssetId, '') === stat.photoAssetId &&
             prev.isEligibleMember === true;
           if (!unchanged) {
             changedCount++;
             ops.push((b) =>
-              b.update(entryRef, {
+              b.set(
+                entryRef,
+                buildNormalizedMonthlyEarningPayload(
+                  {
+                    entryId,
+                    monthKey,
+                    userId: stat.userId,
+                    displayName: stat.displayName,
+                    photoAssetId: stat.photoAssetId,
+                    isEligibleMember: true,
+                    eligibleEarnings: stat.eligibleEarnings,
+                    approvedTaskCount: stat.approvedTaskCount,
+                    reachedAtMs: stat.reachedAtMs,
+                    lastTransactionId: stat.lastTransactionId,
+                    lastSubmissionId: stat.lastSubmissionId,
+                  },
+                  prev
+                )
+              )
+            );
+          }
+        } else {
+          changedCount++;
+          ops.push((b) =>
+            b.set(
+              entryRef,
+              buildNormalizedMonthlyEarningPayload({
+                entryId,
+                monthKey,
+                userId: stat.userId,
                 displayName: stat.displayName,
                 photoAssetId: stat.photoAssetId,
                 isEligibleMember: true,
@@ -1911,83 +2174,68 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
                 reachedAtMs: stat.reachedAtMs,
                 lastTransactionId: stat.lastTransactionId,
                 lastSubmissionId: stat.lastSubmissionId,
-                updatedAt: serverTimestamp(),
               })
-            );
-          }
-        } else {
-          changedCount++;
-          ops.push((b) =>
-            b.set(entryRef, {
-              entryId,
-              monthKey,
-              userId: stat.userId,
-              displayName: stat.displayName,
-              photoAssetId: stat.photoAssetId,
-              isEligibleMember: true,
-              eligibleEarnings: stat.eligibleEarnings,
-              approvedTaskCount: stat.approvedTaskCount,
-              reachedAtMs: stat.reachedAtMs,
-              lastTransactionId: stat.lastTransactionId,
-              lastSubmissionId: stat.lastSubmissionId,
-              createdAt: serverTimestamp(),
-              updatedAt: serverTimestamp(),
-            })
+            )
           );
         }
       }
 
       for (const [entryId, prev] of existingByEntryId.entries()) {
         if (!activeEntryIds.has(entryId) && Number(prev.eligibleEarnings || 0) > 0) {
+          const fallbackUid =
+            sanitizeFirestoreId(prev.userId, '') ||
+            (entryId.startsWith(`${monthKey}_`)
+              ? sanitizeFirestoreId(entryId.slice(monthKey.length + 1), '')
+              : '');
+          if (!fallbackUid || buildMonthlyEntryId(monthKey, fallbackUid) !== entryId) continue;
+
           changedCount++;
           ops.push((b) =>
-            b.update(doc(db, 'monthlyMemberEarnings', entryId), {
-              isEligibleMember: false,
-              eligibleEarnings: 0,
-              approvedTaskCount: 0,
-              reachedAtMs: 0,
-              lastTransactionId: 'admin_sync',
-              lastSubmissionId: '',
-              updatedAt: serverTimestamp(),
-            })
+            b.set(
+              doc(db, 'monthlyMemberEarnings', entryId),
+              buildNormalizedMonthlyEarningPayload(
+                {
+                  entryId,
+                  monthKey,
+                  userId: fallbackUid,
+                  displayName: String(prev.displayName || 'Member'),
+                  photoAssetId: prev.photoAssetId,
+                  isEligibleMember: false,
+                  eligibleEarnings: 0,
+                  approvedTaskCount: 0,
+                  reachedAtMs: 0,
+                  lastTransactionId: 'admin_sync',
+                  lastSubmissionId: '',
+                },
+                prev
+              )
+            )
           );
         }
       }
 
       const nowIso = new Date().toISOString();
-      const rewards = periodSnap.exists()
-        ? normalizeRewardConfigs(periodSnap.data().rewards)
+      const rewards = existingPeriodData
+        ? normalizeRewardConfigs(existingPeriodData.rewards)
         : createEmptyRewardConfigs();
 
-      if (!silentAutoSync || changedCount > 0) {
-        if (periodSnap.exists()) {
-          ops.push((b) =>
-            b.update(periodRef, {
-              winnerCount: isFinalized
-                ? computed.top10.length
-                : Number(periodSnap.data().winnerCount || 0),
-              lastSyncedAt: nowIso,
-              updatedAt: serverTimestamp(),
-            })
-          );
-        } else {
-          ops.push((b) =>
-            b.set(periodRef, {
+      if (!silentAutoSync) {
+        ops.push((b) =>
+          b.set(
+            periodRef,
+            buildNormalizedPeriodPayload(
               monthKey,
-              status: 'open',
-              rewardsPublished: false,
-              announcementDate: '',
-              rewardNote: '',
-              rewards,
-              finalizedAt: '',
-              finalizedBy: '',
-              winnerCount: 0,
-              lastSyncedAt: nowIso,
-              createdAt: serverTimestamp(),
-              updatedAt: serverTimestamp(),
-            })
-          );
-        }
+              {
+                winnerCount: isFinalized
+                  ? computed.top10.length
+                  : Number(existingPeriodData?.winnerCount || 0),
+                lastSyncedAt: nowIso,
+                rewards,
+              },
+              existingPeriodData
+            )
+          )
+        );
       }
 
       if (isFinalized && confirmFinalizedOverride) {
@@ -1995,8 +2243,12 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
           getDocs(query(collection(db, 'leaderboardWinners'), where('monthKey', '==', monthKey))),
           getDocs(query(collection(db, 'leaderboardAdminNotes'), where('monthKey', '==', monthKey))),
         ]);
-        const winById = new Map(winSnap.docs.map((w) => [String(w.data().winnerId), w.data()]));
-        const noteById = new Map(noteSnap.docs.map((n) => [String(n.data().winnerId), n.data()]));
+        const winById = new Map(
+          winSnap.docs.map((w) => [w.id, w.data() as Record<string, unknown>])
+        );
+        const noteById = new Map(
+          noteSnap.docs.map((n) => [n.id, n.data() as Record<string, unknown>])
+        );
 
         for (const row of computed.top10) {
           const winnerId = buildWinnerDocId(monthKey, row.rank);
@@ -2005,67 +2257,48 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
           const prevNote = noteById.get(winnerId);
           const sameWinner = prevWin && prevWin.userId === row.userId;
 
-          const winPayload = {
-            winnerId,
-            monthKey,
-            rank: row.rank,
-            userId: row.userId,
-            displayName: row.displayName,
-            photoAssetId: row.photoAssetId,
-            eligibleEarnings: row.eligibleEarnings,
-            approvedTaskCount: row.approvedTaskCount,
-            reachedAtMs: row.reachedAtMs,
-            prizeTitle: slot && slot.enabled ? slot.prizeTitle : '',
-            prizeDescription: slot && slot.enabled ? slot.prizeDescription : '',
-            monetaryValue: slot && slot.enabled ? slot.monetaryValue : 0,
-            rewardStatus: sameWinner ? String(prevWin.rewardStatus) : 'pending',
-            deliveredAt: sameWinner ? String(prevWin.deliveredAt || '') : '',
-          };
+          ops.push((b) =>
+            b.set(
+              doc(db, 'leaderboardWinners', winnerId),
+              buildNormalizedWinnerPayload(
+                {
+                  winnerId,
+                  monthKey,
+                  rank: row.rank,
+                  userId: row.userId,
+                  displayName: row.displayName,
+                  photoAssetId: row.photoAssetId,
+                  eligibleEarnings: row.eligibleEarnings,
+                  approvedTaskCount: row.approvedTaskCount,
+                  reachedAtMs: row.reachedAtMs,
+                  prizeTitle: slot && slot.enabled ? slot.prizeTitle : '',
+                  prizeDescription: slot && slot.enabled ? slot.prizeDescription : '',
+                  monetaryValue: slot && slot.enabled ? slot.monetaryValue : 0,
+                  rewardStatus: sameWinner ? prevWin.rewardStatus : 'pending',
+                  deliveredAt: sameWinner ? prevWin.deliveredAt : '',
+                },
+                prevWin
+              )
+            )
+          );
 
-          if (prevWin) {
-            ops.push((b) =>
-              b.update(doc(db, 'leaderboardWinners', winnerId), {
-                ...winPayload,
-                updatedAt: serverTimestamp(),
-              })
-            );
-          } else {
-            ops.push((b) =>
-              b.set(doc(db, 'leaderboardWinners', winnerId), {
-                ...winPayload,
-                createdAt: serverTimestamp(),
-                updatedAt: serverTimestamp(),
-              })
-            );
-          }
-
-          const notePayload = {
-            winnerId,
-            monthKey,
-            rank: row.rank,
-            userId: row.userId,
-            memberId: row.memberId,
-            adminNote:
-              prevNote && prevNote.userId === row.userId ? String(prevNote.adminNote || '') : '',
-            updatedBy: uid,
-          };
-
-          if (prevNote) {
-            ops.push((b) =>
-              b.update(doc(db, 'leaderboardAdminNotes', winnerId), {
-                ...notePayload,
-                updatedAt: serverTimestamp(),
-              })
-            );
-          } else {
-            ops.push((b) =>
-              b.set(doc(db, 'leaderboardAdminNotes', winnerId), {
-                ...notePayload,
-                createdAt: serverTimestamp(),
-                updatedAt: serverTimestamp(),
-              })
-            );
-          }
+          ops.push((b) =>
+            b.set(
+              doc(db, 'leaderboardAdminNotes', winnerId),
+              buildNormalizedAdminNotePayload(
+                {
+                  winnerId,
+                  monthKey,
+                  rank: row.rank,
+                  userId: row.userId,
+                  memberId: row.memberId,
+                  adminNote: prevNote && prevNote.userId === row.userId ? prevNote.adminNote : '',
+                  updatedBy: uid,
+                },
+                prevNote
+              )
+            )
+          );
         }
 
         for (let r = computed.top10.length + 1; r <= 10; r++) {
@@ -2079,13 +2312,13 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
         }
       }
 
-      if (!silentAutoSync || changedCount > 0) {
+      if (!silentAutoSync) {
         const logId = randomDocId('log');
         ops.push((b) =>
           b.set(doc(db, 'adminAuditLogs', logId), {
             logId,
             adminUid: uid,
-            adminEmail: email,
+            adminEmail: auditAdminEmail,
             action: isFinalized
               ? 'FINALIZED_LEADERBOARD_RECALCULATED'
               : 'LEADERBOARD_RECALCULATED',
@@ -2111,7 +2344,11 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
         eligibleMemberCount: computed.allMemberStats.length,
       } as unknown as T;
     } catch (err) {
-      wrapPermError(err, OperationType.WRITE, `leaderboardPeriods/${monthKey}`);
+      wrapPermError(
+        err,
+        OperationType.WRITE,
+        silentAutoSync ? 'monthlyMemberEarnings' : `leaderboardPeriods/${monthKey}`
+      );
     }
   }
 
@@ -2236,7 +2473,7 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
       revBatch.set(doc(db, 'adminAuditLogs', logId), {
         logId,
         adminUid: uid,
-        adminEmail: email,
+        adminEmail: auditAdminEmail,
         action: 'EARNING_REVERSED',
         targetType: 'transaction',
         targetId: reversalTxId,
@@ -2265,35 +2502,60 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
       const updatedStat = computed.allMemberStats.find((s) => s.userId === memberUid);
       const syncOps: BatchOp[] = [];
 
-      if (existingEntrySnap.exists()) {
+      if (existingEntrySnap.exists() && entryId.length <= 128) {
+        const prevEntry = existingEntrySnap.data() as Record<string, unknown>;
         syncOps.push((b) =>
-          b.update(doc(db, 'monthlyMemberEarnings', entryId), {
-            isEligibleMember: Boolean(updatedStat),
-            eligibleEarnings: updatedStat ? updatedStat.eligibleEarnings : 0,
-            approvedTaskCount: updatedStat ? updatedStat.approvedTaskCount : 0,
-            reachedAtMs: updatedStat ? updatedStat.reachedAtMs : 0,
-            lastTransactionId: updatedStat ? updatedStat.lastTransactionId : reversalTxId,
-            lastSubmissionId: updatedStat ? updatedStat.lastSubmissionId : refId,
-            updatedAt: serverTimestamp(),
-          })
+          b.set(
+            doc(db, 'monthlyMemberEarnings', entryId),
+            buildNormalizedMonthlyEarningPayload(
+              {
+                entryId,
+                monthKey,
+                userId: memberUid,
+                displayName: updatedStat
+                  ? updatedStat.displayName
+                  : String(prevEntry.displayName || 'Member'),
+                photoAssetId: updatedStat ? updatedStat.photoAssetId : prevEntry.photoAssetId,
+                isEligibleMember: Boolean(updatedStat),
+                eligibleEarnings: updatedStat ? updatedStat.eligibleEarnings : 0,
+                approvedTaskCount: updatedStat ? updatedStat.approvedTaskCount : 0,
+                reachedAtMs: updatedStat ? updatedStat.reachedAtMs : 0,
+                lastTransactionId: updatedStat ? updatedStat.lastTransactionId : reversalTxId,
+                lastSubmissionId: updatedStat ? updatedStat.lastSubmissionId : refId,
+              },
+              prevEntry
+            )
+          )
         );
       }
 
       if (isFinalized && confirmFinalizedOverride && periodSnap.exists()) {
-        const rewards = normalizeRewardConfigs(periodSnap.data().rewards);
+        const existingPeriodData = periodSnap.data() as Record<string, unknown>;
+        const rewards = normalizeRewardConfigs(existingPeriodData.rewards);
         const [winSnap, noteSnap] = await Promise.all([
           getDocs(query(collection(db, 'leaderboardWinners'), where('monthKey', '==', monthKey))),
           getDocs(query(collection(db, 'leaderboardAdminNotes'), where('monthKey', '==', monthKey))),
         ]);
-        const winById = new Map(winSnap.docs.map((w) => [String(w.data().winnerId), w.data()]));
-        const noteById = new Map(noteSnap.docs.map((n) => [String(n.data().winnerId), n.data()]));
+        const winById = new Map(
+          winSnap.docs.map((w) => [w.id, w.data() as Record<string, unknown>])
+        );
+        const noteById = new Map(
+          noteSnap.docs.map((n) => [n.id, n.data() as Record<string, unknown>])
+        );
 
         syncOps.push((b) =>
-          b.update(periodRef, {
-            winnerCount: computed.top10.length,
-            lastSyncedAt: nowIso,
-            updatedAt: serverTimestamp(),
-          })
+          b.set(
+            periodRef,
+            buildNormalizedPeriodPayload(
+              monthKey,
+              {
+                winnerCount: computed.top10.length,
+                lastSyncedAt: nowIso,
+                rewards,
+              },
+              existingPeriodData
+            )
+          )
         );
 
         for (const row of computed.top10) {
@@ -2303,65 +2565,48 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
           const prevNote = noteById.get(winnerId);
           const sameWinner = prevWin && prevWin.userId === row.userId;
 
-          const winPayload = {
-            winnerId,
-            monthKey,
-            rank: row.rank,
-            userId: row.userId,
-            displayName: row.displayName,
-            photoAssetId: row.photoAssetId,
-            eligibleEarnings: row.eligibleEarnings,
-            approvedTaskCount: row.approvedTaskCount,
-            reachedAtMs: row.reachedAtMs,
-            prizeTitle: slot && slot.enabled ? slot.prizeTitle : '',
-            prizeDescription: slot && slot.enabled ? slot.prizeDescription : '',
-            monetaryValue: slot && slot.enabled ? slot.monetaryValue : 0,
-            rewardStatus: sameWinner ? String(prevWin.rewardStatus) : 'pending',
-            deliveredAt: sameWinner ? String(prevWin.deliveredAt || '') : '',
-          };
-          if (prevWin) {
-            syncOps.push((b) =>
-              b.update(doc(db, 'leaderboardWinners', winnerId), {
-                ...winPayload,
-                updatedAt: serverTimestamp(),
-              })
-            );
-          } else {
-            syncOps.push((b) =>
-              b.set(doc(db, 'leaderboardWinners', winnerId), {
-                ...winPayload,
-                createdAt: serverTimestamp(),
-                updatedAt: serverTimestamp(),
-              })
-            );
-          }
+          syncOps.push((b) =>
+            b.set(
+              doc(db, 'leaderboardWinners', winnerId),
+              buildNormalizedWinnerPayload(
+                {
+                  winnerId,
+                  monthKey,
+                  rank: row.rank,
+                  userId: row.userId,
+                  displayName: row.displayName,
+                  photoAssetId: row.photoAssetId,
+                  eligibleEarnings: row.eligibleEarnings,
+                  approvedTaskCount: row.approvedTaskCount,
+                  reachedAtMs: row.reachedAtMs,
+                  prizeTitle: slot && slot.enabled ? slot.prizeTitle : '',
+                  prizeDescription: slot && slot.enabled ? slot.prizeDescription : '',
+                  monetaryValue: slot && slot.enabled ? slot.monetaryValue : 0,
+                  rewardStatus: sameWinner ? prevWin.rewardStatus : 'pending',
+                  deliveredAt: sameWinner ? prevWin.deliveredAt : '',
+                },
+                prevWin
+              )
+            )
+          );
 
-          const notePayload = {
-            winnerId,
-            monthKey,
-            rank: row.rank,
-            userId: row.userId,
-            memberId: row.memberId,
-            adminNote:
-              prevNote && prevNote.userId === row.userId ? String(prevNote.adminNote || '') : '',
-            updatedBy: uid,
-          };
-          if (prevNote) {
-            syncOps.push((b) =>
-              b.update(doc(db, 'leaderboardAdminNotes', winnerId), {
-                ...notePayload,
-                updatedAt: serverTimestamp(),
-              })
-            );
-          } else {
-            syncOps.push((b) =>
-              b.set(doc(db, 'leaderboardAdminNotes', winnerId), {
-                ...notePayload,
-                createdAt: serverTimestamp(),
-                updatedAt: serverTimestamp(),
-              })
-            );
-          }
+          syncOps.push((b) =>
+            b.set(
+              doc(db, 'leaderboardAdminNotes', winnerId),
+              buildNormalizedAdminNotePayload(
+                {
+                  winnerId,
+                  monthKey,
+                  rank: row.rank,
+                  userId: row.userId,
+                  memberId: row.memberId,
+                  adminNote: prevNote && prevNote.userId === row.userId ? prevNote.adminNote : '',
+                  updatedBy: uid,
+                },
+                prevNote
+              )
+            )
+          );
         }
 
         for (let r = computed.top10.length + 1; r <= 10; r++) {
@@ -2422,102 +2667,107 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
         userSnap.docs.map((d) => d.data() as UserProfile)
       );
 
-      const rewards = periodSnap.exists()
-        ? normalizeRewardConfigs(periodSnap.data().rewards)
+      const existingPeriodData = periodSnap.exists()
+        ? (periodSnap.data() as Record<string, unknown>)
+        : undefined;
+      const rewards = existingPeriodData
+        ? normalizeRewardConfigs(existingPeriodData.rewards)
         : createEmptyRewardConfigs();
       const nowIso = new Date().toISOString();
       const ops: BatchOp[] = [];
 
-      const existingByEntryId = new Map(
-        existingEntriesSnap.docs.map((d) => [String(d.data().entryId), d.data()])
-      );
+      const existingByEntryId = new Map<string, Record<string, unknown>>();
+      for (const d of existingEntriesSnap.docs) {
+        if (VALID_ID_REGEX.test(d.id) && d.id.length <= 128) {
+          existingByEntryId.set(d.id, d.data() as Record<string, unknown>);
+        }
+      }
+
       const activeEntryIds = new Set<string>();
       for (const stat of computed.allMemberStats) {
         const entryId = buildMonthlyEntryId(monthKey, stat.userId);
+        if (entryId.length > 128 || !VALID_ID_REGEX.test(entryId)) continue;
         activeEntryIds.add(entryId);
         const prev = existingByEntryId.get(entryId);
-        if (prev) {
-          ops.push((b) =>
-            b.update(doc(db, 'monthlyMemberEarnings', entryId), {
-              displayName: stat.displayName,
-              photoAssetId: stat.photoAssetId,
-              isEligibleMember: true,
-              eligibleEarnings: stat.eligibleEarnings,
-              approvedTaskCount: stat.approvedTaskCount,
-              reachedAtMs: stat.reachedAtMs,
-              lastTransactionId: stat.lastTransactionId,
-              lastSubmissionId: stat.lastSubmissionId,
-              updatedAt: serverTimestamp(),
-            })
-          );
-        } else {
-          ops.push((b) =>
-            b.set(doc(db, 'monthlyMemberEarnings', entryId), {
-              entryId,
-              monthKey,
-              userId: stat.userId,
-              displayName: stat.displayName,
-              photoAssetId: stat.photoAssetId,
-              isEligibleMember: true,
-              eligibleEarnings: stat.eligibleEarnings,
-              approvedTaskCount: stat.approvedTaskCount,
-              reachedAtMs: stat.reachedAtMs,
-              lastTransactionId: stat.lastTransactionId,
-              lastSubmissionId: stat.lastSubmissionId,
-              createdAt: serverTimestamp(),
-              updatedAt: serverTimestamp(),
-            })
-          );
-        }
+        ops.push((b) =>
+          b.set(
+            doc(db, 'monthlyMemberEarnings', entryId),
+            buildNormalizedMonthlyEarningPayload(
+              {
+                entryId,
+                monthKey,
+                userId: stat.userId,
+                displayName: stat.displayName,
+                photoAssetId: stat.photoAssetId,
+                isEligibleMember: true,
+                eligibleEarnings: stat.eligibleEarnings,
+                approvedTaskCount: stat.approvedTaskCount,
+                reachedAtMs: stat.reachedAtMs,
+                lastTransactionId: stat.lastTransactionId,
+                lastSubmissionId: stat.lastSubmissionId,
+              },
+              prev
+            )
+          )
+        );
       }
       for (const [entryId, prev] of existingByEntryId.entries()) {
         if (!activeEntryIds.has(entryId) && Number(prev.eligibleEarnings || 0) > 0) {
+          const fallbackUid =
+            sanitizeFirestoreId(prev.userId, '') ||
+            (entryId.startsWith(`${monthKey}_`)
+              ? sanitizeFirestoreId(entryId.slice(monthKey.length + 1), '')
+              : '');
+          if (!fallbackUid || buildMonthlyEntryId(monthKey, fallbackUid) !== entryId) continue;
+
           ops.push((b) =>
-            b.update(doc(db, 'monthlyMemberEarnings', entryId), {
-              isEligibleMember: false,
-              eligibleEarnings: 0,
-              approvedTaskCount: 0,
-              reachedAtMs: 0,
-              lastTransactionId: 'admin_sync',
-              lastSubmissionId: '',
-              updatedAt: serverTimestamp(),
-            })
+            b.set(
+              doc(db, 'monthlyMemberEarnings', entryId),
+              buildNormalizedMonthlyEarningPayload(
+                {
+                  entryId,
+                  monthKey,
+                  userId: fallbackUid,
+                  displayName: String(prev.displayName || 'Member'),
+                  photoAssetId: prev.photoAssetId,
+                  isEligibleMember: false,
+                  eligibleEarnings: 0,
+                  approvedTaskCount: 0,
+                  reachedAtMs: 0,
+                  lastTransactionId: 'admin_sync',
+                  lastSubmissionId: '',
+                },
+                prev
+              )
+            )
           );
         }
       }
 
-      if (periodSnap.exists()) {
-        ops.push((b) =>
-          b.update(periodRef, {
-            status: 'finalized',
-            finalizedAt: nowIso,
-            finalizedBy: uid,
-            winnerCount: computed.top10.length,
-            lastSyncedAt: nowIso,
-            updatedAt: serverTimestamp(),
-          })
-        );
-      } else {
-        ops.push((b) =>
-          b.set(periodRef, {
+      ops.push((b) =>
+        b.set(
+          periodRef,
+          buildNormalizedPeriodPayload(
             monthKey,
-            status: 'finalized',
-            rewardsPublished: false,
-            announcementDate: '',
-            rewardNote: '',
-            rewards,
-            finalizedAt: nowIso,
-            finalizedBy: uid,
-            winnerCount: computed.top10.length,
-            lastSyncedAt: nowIso,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          })
-        );
-      }
+            {
+              status: 'finalized',
+              rewards,
+              finalizedAt: nowIso,
+              finalizedBy: uid,
+              winnerCount: computed.top10.length,
+              lastSyncedAt: nowIso,
+            },
+            existingPeriodData
+          )
+        )
+      );
 
-      const winById = new Map(winSnap.docs.map((w) => [String(w.data().winnerId), w.data()]));
-      const noteById = new Map(noteSnap.docs.map((n) => [String(n.data().winnerId), n.data()]));
+      const winById = new Map(
+        winSnap.docs.map((w) => [w.id, w.data() as Record<string, unknown>])
+      );
+      const noteById = new Map(
+        noteSnap.docs.map((n) => [n.id, n.data() as Record<string, unknown>])
+      );
 
       for (const row of computed.top10) {
         const winnerId = buildWinnerDocId(monthKey, row.rank);
@@ -2526,67 +2776,48 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
         const prevNote = noteById.get(winnerId);
         const sameWinner = prevWin && prevWin.userId === row.userId;
 
-        const winPayload = {
-          winnerId,
-          monthKey,
-          rank: row.rank,
-          userId: row.userId,
-          displayName: row.displayName,
-          photoAssetId: row.photoAssetId,
-          eligibleEarnings: row.eligibleEarnings,
-          approvedTaskCount: row.approvedTaskCount,
-          reachedAtMs: row.reachedAtMs,
-          prizeTitle: slot && slot.enabled ? slot.prizeTitle : '',
-          prizeDescription: slot && slot.enabled ? slot.prizeDescription : '',
-          monetaryValue: slot && slot.enabled ? slot.monetaryValue : 0,
-          rewardStatus: sameWinner ? String(prevWin.rewardStatus) : 'pending',
-          deliveredAt: sameWinner ? String(prevWin.deliveredAt || '') : '',
-        };
+        ops.push((b) =>
+          b.set(
+            doc(db, 'leaderboardWinners', winnerId),
+            buildNormalizedWinnerPayload(
+              {
+                winnerId,
+                monthKey,
+                rank: row.rank,
+                userId: row.userId,
+                displayName: row.displayName,
+                photoAssetId: row.photoAssetId,
+                eligibleEarnings: row.eligibleEarnings,
+                approvedTaskCount: row.approvedTaskCount,
+                reachedAtMs: row.reachedAtMs,
+                prizeTitle: slot && slot.enabled ? slot.prizeTitle : '',
+                prizeDescription: slot && slot.enabled ? slot.prizeDescription : '',
+                monetaryValue: slot && slot.enabled ? slot.monetaryValue : 0,
+                rewardStatus: sameWinner ? prevWin.rewardStatus : 'pending',
+                deliveredAt: sameWinner ? prevWin.deliveredAt : '',
+              },
+              prevWin
+            )
+          )
+        );
 
-        if (prevWin) {
-          ops.push((b) =>
-            b.update(doc(db, 'leaderboardWinners', winnerId), {
-              ...winPayload,
-              updatedAt: serverTimestamp(),
-            })
-          );
-        } else {
-          ops.push((b) =>
-            b.set(doc(db, 'leaderboardWinners', winnerId), {
-              ...winPayload,
-              createdAt: serverTimestamp(),
-              updatedAt: serverTimestamp(),
-            })
-          );
-        }
-
-        const notePayload = {
-          winnerId,
-          monthKey,
-          rank: row.rank,
-          userId: row.userId,
-          memberId: row.memberId,
-          adminNote:
-            prevNote && prevNote.userId === row.userId ? String(prevNote.adminNote || '') : '',
-          updatedBy: uid,
-        };
-
-        if (prevNote) {
-          ops.push((b) =>
-            b.update(doc(db, 'leaderboardAdminNotes', winnerId), {
-              ...notePayload,
-              updatedAt: serverTimestamp(),
-            })
-          );
-        } else {
-          ops.push((b) =>
-            b.set(doc(db, 'leaderboardAdminNotes', winnerId), {
-              ...notePayload,
-              createdAt: serverTimestamp(),
-              updatedAt: serverTimestamp(),
-            })
-          );
-        }
+        ops.push((b) =>
+          b.set(
+            doc(db, 'leaderboardAdminNotes', winnerId),
+            buildNormalizedAdminNotePayload(
+              {
+                winnerId,
+                monthKey,
+                rank: row.rank,
+                userId: row.userId,
+                memberId: row.memberId,
+                adminNote: prevNote && prevNote.userId === row.userId ? prevNote.adminNote : '',
+                updatedBy: uid,
+              },
+              prevNote
+            )
+          )
+        );
       }
 
       for (let r = computed.top10.length + 1; r <= 10; r++) {
@@ -2604,7 +2835,7 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
         b.set(doc(db, 'adminAuditLogs', logId), {
           logId,
           adminUid: uid,
-          adminEmail: email,
+          adminEmail: auditAdminEmail,
           action: confirmReFinalize
             ? 'LEADERBOARD_MONTH_REFINALIZED'
             : 'LEADERBOARD_MONTH_FINALIZED',
@@ -2655,12 +2886,17 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
       if (!winSnap.exists()) {
         throw new Error('Finalized winner record not found.');
       }
-      const winData = winSnap.data();
-      const userSnap = await getDoc(doc(db, 'users', String(winData.userId)));
-      const memberCode = String(
-        (noteSnap.exists() ? noteSnap.data().memberId : '') ||
-          (userSnap.exists() ? userSnap.data().memberId : '') ||
-          'MTS-000000'
+      const winData = winSnap.data() as Record<string, unknown>;
+      const winUserId = sanitizeFirestoreId(winData.userId, '');
+      if (!winUserId) {
+        throw new Error('Winner user ID is invalid.');
+      }
+      const userSnap = await getDoc(doc(db, 'users', winUserId));
+      const existingNoteData = noteSnap.exists()
+        ? (noteSnap.data() as Record<string, unknown>)
+        : undefined;
+      const memberCode = sanitizeMemberCode(
+        existingNoteData?.memberId || (userSnap.exists() ? userSnap.data().memberId : undefined)
       );
 
       const deliveredAt =
@@ -2671,40 +2907,51 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
           : rawDeliveredAt;
 
       const batch = writeBatch(db);
-      batch.update(winRef, {
-        rewardStatus,
-        deliveredAt,
-        updatedAt: serverTimestamp(),
-      });
+      batch.set(
+        winRef,
+        buildNormalizedWinnerPayload(
+          {
+            winnerId,
+            monthKey: String(winData.monthKey),
+            rank: Number(winData.rank),
+            userId: winUserId,
+            displayName: String(winData.displayName || 'Member'),
+            photoAssetId: winData.photoAssetId,
+            eligibleEarnings: Number(winData.eligibleEarnings || 1),
+            approvedTaskCount: Number(winData.approvedTaskCount || 1),
+            reachedAtMs: Number(winData.reachedAtMs || 0),
+            prizeTitle: String(winData.prizeTitle || ''),
+            prizeDescription: String(winData.prizeDescription || ''),
+            monetaryValue: Number(winData.monetaryValue || 0),
+            rewardStatus,
+            deliveredAt,
+          },
+          winData
+        )
+      );
 
-      const notePayload = {
-        winnerId,
-        monthKey: String(winData.monthKey),
-        rank: Number(winData.rank),
-        userId: String(winData.userId),
-        memberId: memberCode,
-        adminNote,
-        updatedBy: uid,
-      };
-      if (noteSnap.exists()) {
-        batch.update(noteRef, {
-          ...notePayload,
-          updatedAt: serverTimestamp(),
-        });
-      } else {
-        batch.set(noteRef, {
-          ...notePayload,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-      }
+      batch.set(
+        noteRef,
+        buildNormalizedAdminNotePayload(
+          {
+            winnerId,
+            monthKey: String(winData.monthKey),
+            rank: Number(winData.rank),
+            userId: winUserId,
+            memberId: memberCode,
+            adminNote,
+            updatedBy: uid,
+          },
+          existingNoteData
+        )
+      );
 
       if (rewardStatus === 'awarded' && notifyWinner && winData.rewardStatus !== 'awarded') {
         const notifId = randomDocId('ntf');
         const prizeText = String(winData.prizeTitle || 'Monthly Best 10 Prize');
         batch.set(doc(db, 'notifications', notifId), {
           notificationId: notifId,
-          userId: String(winData.userId),
+          userId: winUserId,
           type: 'leaderboard_reward',
           title: `Best 10 Rank #${winData.rank} Reward Delivered!`,
           message: `Congratulations! Your ${winData.monthKey} Best 10 reward (${prizeText}) has been marked as Awarded.`.slice(
@@ -2722,7 +2969,7 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
       batch.set(doc(db, 'adminAuditLogs', logId), {
         logId,
         adminUid: uid,
-        adminEmail: email,
+        adminEmail: auditAdminEmail,
         action: 'LEADERBOARD_REWARD_STATUS_UPDATED',
         targetType: 'leaderboardWinner',
         targetId: winnerId,
@@ -2793,7 +3040,7 @@ export async function executeClientFirestoreFallback<T = Record<string, unknown>
           b.set(doc(db, 'adminAuditLogs', logId), {
             logId,
             adminUid: uid,
-            adminEmail: email,
+            adminEmail: auditAdminEmail,
             action: 'APPROVED_SUBMISSIONS_PURGED',
             targetType: 'system',
             targetId: 'approved_cleanup',

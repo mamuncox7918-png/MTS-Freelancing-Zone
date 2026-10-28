@@ -23,6 +23,7 @@ import {
   getDhakaMonthKey,
   getRecentDhakaMonthKeys,
   normalizeRewardConfigs,
+  sanitizeFirestoreId,
   type ComputedMemberMonthlyLedger,
 } from '../lib/leaderboard';
 import { AvatarDisplay } from './MediaView';
@@ -56,7 +57,9 @@ export function AdminBest10Section({
   const [subTab, setSubTab] = useState<Best10AdminSubTab>('standings');
 
   const [periods, setPeriods] = useState<LeaderboardPeriod[]>([]);
+  const [periodsLoaded, setPeriodsLoaded] = useState<boolean>(false);
   const [monthEntries, setMonthEntries] = useState<MonthlyMemberEarning[]>([]);
+  const [monthEntriesLoaded, setMonthEntriesLoaded] = useState<boolean>(false);
   const [winners, setWinners] = useState<LeaderboardWinner[]>([]);
   const [winnerNotes, setWinnerNotes] = useState<LeaderboardWinnerAdminMeta[]>([]);
 
@@ -104,6 +107,7 @@ export function AdminBest10Section({
         const list = snap.docs.map((d) => d.data() as LeaderboardPeriod);
         list.sort((a, b) => b.monthKey.localeCompare(a.monthKey));
         setPeriods(list);
+        setPeriodsLoaded(true);
       },
       (err) => handleFirestoreError(err, OperationType.LIST, 'leaderboardPeriods')
     );
@@ -112,11 +116,13 @@ export function AdminBest10Section({
 
   // Subscribe to selected month's projections, winners, and admin notes
   useEffect(() => {
+    setMonthEntriesLoaded(false);
     const unsubs = [
       onSnapshot(
         query(collection(db, 'monthlyMemberEarnings'), where('monthKey', '==', selectedMonthKey)),
         (snap) => {
           setMonthEntries(snap.docs.map((d) => d.data() as MonthlyMemberEarning));
+          setMonthEntriesLoaded(true);
         },
         (err) => handleFirestoreError(err, OperationType.LIST, 'monthlyMemberEarnings')
       ),
@@ -190,7 +196,7 @@ export function AdminBest10Section({
         prev.approvedTaskCount !== stat.approvedTaskCount ||
         prev.reachedAtMs !== stat.reachedAtMs ||
         prev.displayName !== stat.displayName ||
-        prev.photoAssetId !== stat.photoAssetId ||
+        sanitizeFirestoreId(prev.photoAssetId, '') !== stat.photoAssetId ||
         prev.isEligibleMember !== true
       ) {
         diffs++;
@@ -209,6 +215,7 @@ export function AdminBest10Section({
 
   // Silent auto-reconcile once per open month if out of sync so members see exact live rankings
   useEffect(() => {
+    if (!periodsLoaded || !monthEntriesLoaded) return;
     if (isFinalized) return;
     if (users.length === 0) return;
     if (outOfSyncCount === 0) return;
@@ -223,7 +230,14 @@ export function AdminBest10Section({
         silentAutoSync: true,
       },
     }).catch(() => undefined);
-  }, [selectedMonthKey, isFinalized, users.length, outOfSyncCount]);
+  }, [
+    periodsLoaded,
+    monthEntriesLoaded,
+    selectedMonthKey,
+    isFinalized,
+    users.length,
+    outOfSyncCount,
+  ]);
 
   const noteByWinnerId = useMemo(() => {
     const map = new Map<string, LeaderboardWinnerAdminMeta>();

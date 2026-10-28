@@ -31,6 +31,7 @@ import {
   getUnreversedRewardTransactions,
   isValidMonthKey,
   normalizeRewardConfigs,
+  sanitizeFirestoreId,
 } from './src/lib/leaderboard.ts';
 import type { UserProfile, WalletTransaction } from './src/types.ts';
 
@@ -1195,19 +1196,25 @@ async function startServer() {
 
               if (
                 memberProfile.data.role === 'member' &&
-                memberProfile.data.status === 'approved'
+                memberProfile.data.status === 'approved' &&
+                monthlyEntryId.length <= 128
               ) {
-                const displayName = String(
-                  memberProfile.data.fullName || submission.data.memberName || 'Member'
-                ).slice(0, 300);
-                const photoAssetId = String(memberProfile.data.photoAssetId || '');
+                const displayName =
+                  String(
+                    memberProfile.data.fullName || submission.data.memberName || 'Member'
+                  )
+                    .trim()
+                    .slice(0, 300) || 'Member';
+                const photoAssetId = sanitizeFirestoreId(memberProfile.data.photoAssetId, '');
                 if (monthlyEntry) {
                   writes.push(
                     buildReplaceUpdateWrite(
                       'monthlyMemberEarnings',
                       monthlyEntryId,
                       {
-                        ...monthlyEntry.data,
+                        entryId: monthlyEntryId,
+                        monthKey,
+                        userId: memberUid,
                         displayName,
                         photoAssetId,
                         isEligibleMember: true,
@@ -2259,19 +2266,25 @@ async function startServer() {
 
               if (
                 memberProfile.data.role === 'member' &&
-                memberProfile.data.status === 'approved'
+                memberProfile.data.status === 'approved' &&
+                monthlyEntryId.length <= 128
               ) {
-                const displayName = String(
-                  memberProfile.data.fullName || customTask.data.memberName || 'Member'
-                ).slice(0, 300);
-                const photoAssetId = String(memberProfile.data.photoAssetId || '');
+                const displayName =
+                  String(
+                    memberProfile.data.fullName || customTask.data.memberName || 'Member'
+                  )
+                    .trim()
+                    .slice(0, 300) || 'Member';
+                const photoAssetId = sanitizeFirestoreId(memberProfile.data.photoAssetId, '');
                 if (monthlyEntry) {
                   writes.push(
                     buildReplaceUpdateWrite(
                       'monthlyMemberEarnings',
                       monthlyEntryId,
                       {
-                        ...monthlyEntry.data,
+                        entryId: monthlyEntryId,
+                        monthKey,
+                        userId: memberUid,
                         displayName,
                         photoAssetId,
                         isEligibleMember: true,
@@ -2540,11 +2553,19 @@ async function startServer() {
               'leaderboardPeriods',
               monthKey,
               {
-                ...existingPeriod.data,
+                monthKey,
+                status: existingPeriod.data.status === 'finalized' ? 'finalized' : 'open',
                 rewardsPublished,
                 announcementDate,
                 rewardNote,
                 rewards,
+                finalizedAt: String(existingPeriod.data.finalizedAt || '').slice(0, 40),
+                finalizedBy: sanitizeFirestoreId(existingPeriod.data.finalizedBy, ''),
+                winnerCount: Math.min(
+                  10,
+                  Math.max(0, Math.floor(Number(existingPeriod.data.winnerCount || 0)))
+                ),
+                lastSyncedAt: String(existingPeriod.data.lastSyncedAt || nowIso).slice(0, 40),
                 createdAt: preserveTimestamp(existingPeriod.raw, 'createdAt'),
               },
               existingPeriod.updateTime
@@ -2701,7 +2722,7 @@ async function startServer() {
               Number(prev.data.approvedTaskCount) === stat.approvedTaskCount &&
               Number(prev.data.reachedAtMs) === stat.reachedAtMs &&
               prev.data.displayName === stat.displayName &&
-              prev.data.photoAssetId === stat.photoAssetId &&
+              sanitizeFirestoreId(prev.data.photoAssetId, '') === stat.photoAssetId &&
               prev.data.isEligibleMember === true;
             if (!unchanged) {
               changedCount++;
@@ -2710,7 +2731,9 @@ async function startServer() {
                   'monthlyMemberEarnings',
                   entryId,
                   {
-                    ...prev.data,
+                    entryId,
+                    monthKey,
+                    userId: stat.userId,
                     displayName: stat.displayName,
                     photoAssetId: stat.photoAssetId,
                     isEligibleMember: true,
@@ -2753,13 +2776,22 @@ async function startServer() {
         // Zero out any stale entry in this month that no longer has eligible earnings
         for (const [entryId, prev] of existingByEntryId.entries()) {
           if (!activeEntryIds.has(entryId) && Number(prev.data.eligibleEarnings || 0) > 0) {
+            const fallbackUid = sanitizeFirestoreId(prev.data.userId, '');
+            if (!fallbackUid || buildMonthlyEntryId(monthKey, fallbackUid) !== entryId) continue;
             changedCount++;
             writes.push(
               buildReplaceUpdateWrite(
                 'monthlyMemberEarnings',
                 entryId,
                 {
-                  ...prev.data,
+                  entryId,
+                  monthKey,
+                  userId: fallbackUid,
+                  displayName:
+                    String(prev.data.displayName || 'Member')
+                      .trim()
+                      .slice(0, 300) || 'Member',
+                  photoAssetId: sanitizeFirestoreId(prev.data.photoAssetId, ''),
                   isEligibleMember: false,
                   eligibleEarnings: 0,
                   approvedTaskCount: 0,
@@ -2779,17 +2811,27 @@ async function startServer() {
           ? normalizeRewardConfigs(existingPeriod.data.rewards)
           : createEmptyRewardConfigs();
 
-        if (!silentAutoSync || changedCount > 0) {
+        if (!silentAutoSync) {
           if (existingPeriod) {
             writes.push(
               buildReplaceUpdateWrite(
                 'leaderboardPeriods',
                 monthKey,
                 {
-                  ...existingPeriod.data,
+                  monthKey,
+                  status: isFinalized ? 'finalized' : 'open',
+                  rewardsPublished: Boolean(existingPeriod.data.rewardsPublished),
+                  announcementDate: String(existingPeriod.data.announcementDate || '').slice(0, 40),
+                  rewardNote: String(existingPeriod.data.rewardNote || '').slice(0, 1000),
+                  rewards,
+                  finalizedAt: String(existingPeriod.data.finalizedAt || '').slice(0, 40),
+                  finalizedBy: sanitizeFirestoreId(existingPeriod.data.finalizedBy, ''),
                   winnerCount: isFinalized
                     ? computed.top10.length
-                    : Number(existingPeriod.data.winnerCount || 0),
+                    : Math.min(
+                        10,
+                        Math.max(0, Math.floor(Number(existingPeriod.data.winnerCount || 0)))
+                      ),
                   lastSyncedAt: nowIso,
                   createdAt: preserveTimestamp(existingPeriod.raw, 'createdAt'),
                 },
@@ -2911,7 +2953,7 @@ async function startServer() {
           }
         }
 
-        if (!silentAutoSync || changedCount > 0) {
+        if (!silentAutoSync) {
           const logId = generateDocId('log');
           writes.push(
             buildCreateWrite(
